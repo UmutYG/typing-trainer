@@ -18,6 +18,9 @@
   --error-soft: rgba(230, 103, 103, 0.25);
   --good: #0ca30c;
   --warm: #ec835a;
+}
+
+:root {
   --type-font: ui-monospace, "SF Mono", Menlo, monospace;
   --ui-font: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
