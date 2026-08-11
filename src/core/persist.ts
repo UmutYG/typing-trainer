@@ -30,6 +30,13 @@ export interface SessionRecord {
 const DB_NAME = "typing-trainer";
 const DB_VERSION = 2; // v2 adds the "tests" store
 
+export class DbBlockedError extends Error {
+  constructor() {
+    super("Another tab has this app open and is blocking an update. Close other tabs and reload.");
+    this.name = "DbBlockedError";
+  }
+}
+
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -41,7 +48,16 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains("tests"))
         db.createObjectStore("tests", { keyPath: "id", autoIncrement: true });
     };
-    req.onsuccess = () => resolve(req.result);
+    // fires when an older open connection (another tab) is holding the DB
+    // and won't let the version upgrade proceed — without this the open
+    // request just hangs forever with no error and no success
+    req.onblocked = () => reject(new DbBlockedError());
+    req.onsuccess = () => {
+      // if a second tab opens *after* us and needs a future version, let it:
+      // close cleanly instead of blocking it forever in turn
+      req.result.onversionchange = () => req.result.close();
+      resolve(req.result);
+    };
     req.onerror = () => reject(req.error);
   });
 }

@@ -47,10 +47,10 @@ export function DrillScreen({ lineText, targets, feedback, onLineComplete }: Pro
               <b>{(feedback.stats.accuracy * 100).toFixed(1)}</b>%
             </span>
             {feedback.slowest.length > 0 && <span className="meta-label">slowest</span>}
-            {feedback.slowest.map((s) => {
+            {feedback.slowest.map((s, i) => {
               const cls = classifyTransition(s.bigram[0], s.bigram[1]);
               return (
-                <span className="chip slow" key={s.bigram}>
+                <span className="chip slow" key={`${s.bigram}-${i}`}>
                   <b>{show(s.bigram)}</b> {s.iki.toFixed(0)} ms
                   {cls && <span className="cls">{CLASS_LABELS[cls]}</span>}
                 </span>

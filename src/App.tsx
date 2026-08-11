@@ -28,6 +28,7 @@ export default function App() {
   const corpus = useMemo(() => buildCorpus(wordsRaw), []);
   const modelRef = useRef(new SkillModel());
   const [ready, setReady] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("practice");
   const [theme, setTheme] = useState<Theme>(loadTheme);
   const [line, setLine] = useState<GeneratedLine | null>(null);
@@ -59,18 +60,22 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [savedModel, savedSessions, savedTests, savedGoals] = await Promise.all([
-        persist.loadModel(),
-        persist.getSessions(),
-        persist.getTests(),
-        persist.loadGoals(),
-      ]);
-      if (cancelled) return;
-      if (savedModel) modelRef.current = SkillModel.deserialize(savedModel);
-      setSessions(savedSessions);
-      setTests(savedTests);
-      setGoals(savedGoals ?? emptyGoalState());
-      setReady(true);
+      try {
+        const [savedModel, savedSessions, savedTests, savedGoals] = await Promise.all([
+          persist.loadModel(),
+          persist.getSessions(),
+          persist.getTests(),
+          persist.loadGoals(),
+        ]);
+        if (cancelled) return;
+        if (savedModel) modelRef.current = SkillModel.deserialize(savedModel);
+        setSessions(savedSessions);
+        setTests(savedTests);
+        setGoals(savedGoals ?? emptyGoalState());
+        setReady(true);
+      } catch (e) {
+        if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
+      }
     })();
     return () => {
       cancelled = true;
@@ -234,7 +239,16 @@ export default function App() {
 
       {toast && <div className="toast">{toast}</div>}
 
-      {!ready || line === null ? (
+      {loadError ? (
+        <div className="hint">
+          {loadError}
+          <div style={{ marginTop: 14 }}>
+            <button className="btn" onClick={() => location.reload()}>
+              Reload
+            </button>
+          </div>
+        </div>
+      ) : !ready || line === null ? (
         <div className="hint">loading…</div>
       ) : tab === "practice" ? (
         <DrillScreen
