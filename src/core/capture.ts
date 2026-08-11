@@ -76,6 +76,16 @@ export class CaptureEngine {
     return this.pos < this.line.length;
   }
 
+  /** Wrong keystrokes so far on the current line (for mid-line snapshots). */
+  get errorsSoFar(): number {
+    return this.totalErrors;
+  }
+
+  /** Partial results for the current line (for a timer expiring mid-line). */
+  snapshot(): { chars: CharResult[]; totalErrors: number } {
+    return { chars: [...this.results], totalErrors: this.totalErrors };
+  }
+
   feed(ev: KeyEventLite): void {
     if (ev.type === "up") {
       this.pressed.delete(ev.code);

@@ -22,13 +22,13 @@ export type TransitionClass =
   | "shift";
 
 export const CLASS_LABELS: Record<TransitionClass, string> = {
-  repeat: "repeated key",
-  "same-finger": "same finger",
+  repeat: "double tap",
+  "same-finger": "same finger twice",
   "same-hand-roll": "same-hand roll",
-  "same-hand-stretch": "same-hand stretch",
-  alternating: "hand alternation",
-  space: "space transition",
-  shift: "shift-involved",
+  "same-hand-stretch": "same-hand reach",
+  alternating: "hand switch",
+  space: "around the space bar",
+  shift: "with shift",
 };
 
 const KEYS: Record<string, KeyInfo> = {};
@@ -118,4 +118,35 @@ export function classifyTransition(a: string, b: string): TransitionClass | unde
 /** All characters the model knows the physical location of. */
 export function knownChars(): string[] {
   return Object.keys(KEYS);
+}
+
+const FINGER_NAMES = ["pinky", "ring", "middle", "index", "thumb"];
+const HAND_NAMES: Record<Hand, string> = { L: "left", R: "right", T: "" };
+
+/**
+ * A short human sentence explaining the physical shape of a transition —
+ * what the Progress page shows instead of raw class labels.
+ */
+export function describePair(bigram: string): string {
+  const [a, b] = [bigram[0], bigram[1]];
+  const cls = classifyTransition(a, b);
+  const kb = keyInfo(b);
+  if (!cls || !kb) return "";
+  const fingerOf = (k: KeyInfo) => `${HAND_NAMES[k.hand]} ${FINGER_NAMES[k.finger]}`.trim();
+  switch (cls) {
+    case "space":
+      return a === " " ? `coming off the space bar into ${fingerOf(kb)}` : "landing on the space bar";
+    case "repeat":
+      return `double-tapping with the ${fingerOf(kb)}`;
+    case "same-finger":
+      return `the ${fingerOf(kb)} has to move twice in a row`;
+    case "same-hand-roll":
+      return `a roll inside the ${HAND_NAMES[kb.hand]} hand`;
+    case "same-hand-stretch":
+      return `an awkward reach inside the ${HAND_NAMES[kb.hand]} hand`;
+    case "alternating":
+      return `a hand switch onto the ${fingerOf(kb)}`;
+    case "shift":
+      return "involves holding shift";
+  }
 }

@@ -1,16 +1,21 @@
-import { useEffect, useRef, useState } from "react";
-import { CaptureEngine, type LineResult } from "../core/capture";
+import type { LineResult } from "../core/capture";
 import { CLASS_LABELS, classifyTransition } from "../core/keyboard";
 import type { LineStats } from "../core/wpm";
+import { useTypingLine } from "./useTypingLine";
 
 export interface LineFeedback {
   stats: LineStats;
   slowest: { bigram: string; iki: number }[];
 }
 
+export interface TargetInfo {
+  bigram: string;
+  mean: number | null; // current model speed for this pair, ms
+}
+
 interface Props {
   lineText: string;
-  targets: string[];
+  targets: TargetInfo[];
   feedback: LineFeedback | null;
   onLineComplete: (result: LineResult) => void;
 }
@@ -18,42 +23,7 @@ interface Props {
 const show = (bg: string) => bg.replace(/ /g, "␣");
 
 export function DrillScreen({ lineText, targets, feedback, onLineComplete }: Props) {
-  const engineRef = useRef<CaptureEngine | null>(null);
-  const [pos, setPos] = useState(0);
-  const [err, setErr] = useState(false);
-  const completeRef = useRef(onLineComplete);
-  completeRef.current = onLineComplete;
-
-  useEffect(() => {
-    if (!engineRef.current) engineRef.current = new CaptureEngine();
-    const eng = engineRef.current;
-    eng.setLine(lineText);
-    setPos(0);
-    setErr(false);
-    eng.onProgress = (p, errorAtPos) => {
-      setPos(p);
-      setErr(errorAtPos);
-    };
-    eng.onComplete = (r) => completeRef.current(r);
-  }, [lineText]);
-
-  useEffect(() => {
-    const down = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.repeat) return;
-      if (e.key === " " || e.key.length === 1) e.preventDefault();
-      engineRef.current?.feed({ type: "down", key: e.key, code: e.code, time: performance.now() });
-    };
-    const up = (e: KeyboardEvent) => {
-      engineRef.current?.feed({ type: "up", key: e.key, code: e.code, time: performance.now() });
-    };
-    window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
-    return () => {
-      window.removeEventListener("keydown", down);
-      window.removeEventListener("keyup", up);
-    };
-  }, []);
+  const { pos, err } = useTypingLine(lineText, onLineComplete);
 
   return (
     <div className="drill">
@@ -61,9 +31,7 @@ export function DrillScreen({ lineText, targets, feedback, onLineComplete }: Pro
         <div className="line" aria-label="text to type">
           <span className="done">{lineText.slice(0, pos)}</span>
           {pos < lineText.length && (
-            <span className={"cur" + (err ? " err" : "")}>
-              {lineText[pos] === " " ? " " : lineText[pos]}
-            </span>
+            <span className={"cur" + (err ? " err" : "")}>{lineText[pos]}</span>
           )}
           <span className="todo">{lineText.slice(pos + 1)}</span>
         </div>
@@ -90,15 +58,16 @@ export function DrillScreen({ lineText, targets, feedback, onLineComplete }: Pro
             })}
           </>
         ) : (
-          <span className="meta-label">start typing — the line adapts to you</span>
+          <span className="meta-label">start typing — every line targets your weakest spots</span>
         )}
       </div>
 
       <div className="targets-row">
-        <span className="meta-label">training</span>
+        <span className="meta-label">working on</span>
         {targets.map((t) => (
-          <span className="chip" key={t}>
-            {show(t)}
+          <span className="chip" key={t.bigram}>
+            <b>{show(t.bigram)}</b>
+            {t.mean !== null && <span className="cls">{t.mean.toFixed(0)} ms</span>}
           </span>
         ))}
       </div>
