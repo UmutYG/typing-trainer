@@ -14,7 +14,6 @@ interface Props {
   tests: TestRecord[];
   goals: GoalState;
   corpus: Corpus;
-  darkTheme: boolean;
   onExport: () => void;
   onReset: () => void;
   onGoTest: () => void;
@@ -32,7 +31,12 @@ function rollingMean(values: number[], window: number): number[] {
   return out;
 }
 
-function goalNow(g: Goal, model: SkillModel, tests: TestRecord[], accuracy: number | null): number | null {
+export function goalNow(
+  g: Goal,
+  model: SkillModel,
+  tests: TestRecord[],
+  accuracy: number | null,
+): number | null {
   switch (g.kind) {
     case "first-test":
       return tests.length;
@@ -47,12 +51,12 @@ function goalNow(g: Goal, model: SkillModel, tests: TestRecord[], accuracy: numb
   }
 }
 
-function fmtGoalValue(g: Goal, v: number | null): string {
+export function fmtGoalValue(g: Goal, v: number | null): string {
   if (v === null) return "—";
   if (g.kind === "accuracy") return (v * 100).toFixed(1) + "%";
-  if (g.kind === "pair-speed") return v.toFixed(0) + " ms";
-  if (g.kind === "first-test") return v >= 1 ? "done" : "not yet";
-  return v.toFixed(0) + " wpm";
+  if (g.kind === "pair-speed") return v.toFixed(0) + "ms";
+  if (g.kind === "first-test") return v >= 1 ? "done" : "0";
+  return v.toFixed(0);
 }
 
 export function Progress({
@@ -61,93 +65,99 @@ export function Progress({
   tests,
   goals,
   corpus,
-  darkTheme,
   onExport,
   onReset,
   onGoTest,
 }: Props) {
   const recent = sessions.slice(-50);
-  const practiceWpm = recent.length >= 5 ? recent.reduce((a, s) => a + s.wpm, 0) / recent.length : null;
-  const accuracy = recent.length >= 5 ? recent.reduce((a, s) => a + s.accuracy, 0) / recent.length : null;
+  const practiceWpm =
+    recent.length >= 5 ? recent.reduce((a, s) => a + s.wpm, 0) / recent.length : null;
+  const accuracy =
+    recent.length >= 5 ? recent.reduce((a, s) => a + s.accuracy, 0) / recent.length : null;
   const bestTest = tests.length > 0 ? Math.max(...tests.map((t) => t.wpm)) : null;
   const lastTest = tests.length > 0 ? tests[tests.length - 1] : null;
 
   const wpmTrend = useMemo(() => rollingMean(sessions.map((s) => s.wpm), 10), [sessions]);
   const weakPoints = useMemo(
-    () => model.bottlenecks(corpus.engFreq, 24).filter((b) => b.count >= 10).slice(0, 4),
+    () => model.bottlenecks(corpus.engFreq, 24).filter((b) => b.count >= 10).slice(0, 5),
     [model, corpus],
   );
   const keyExcess = useMemo(() => model.keyExcess(), [model]);
-  const achievedRecent = [...goals.achieved].reverse().slice(0, 4);
+  const wonRecent = [...goals.achieved].reverse().slice(0, 5);
 
   return (
-    <div className="stats">
-      <div className="hero-row">
-        <div className="hero-tile main">
+    <div className="stack">
+      <div className="headline">
+        <div className="card">
           {bestTest !== null ? (
             <>
-              <div className="hero-num">{bestTest.toFixed(0)}</div>
-              <div className="hero-unit">wpm — your speed</div>
+              <div className="num">{bestTest.toFixed(0)}</div>
+              <div className="cap">wpm · your best</div>
               {lastTest && (
-                <div className="hero-sub">
-                  last test {lastTest.wpm.toFixed(0)} wpm ·{" "}
-                  {new Date(lastTest.time).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                <div className="since">
+                  last test {lastTest.wpm.toFixed(0)} ·{" "}
+                  {new Date(lastTest.time).toLocaleDateString(undefined, {
+                    month: "short",
+                    day: "numeric",
+                  })}
                 </div>
               )}
             </>
           ) : (
             <>
-              <div className="hero-num muted">?</div>
-              <div className="hero-unit">your speed</div>
-              <button className="btn primary" onClick={onGoTest} style={{ marginTop: 10 }}>
+              <div className="num empty">—</div>
+              <div className="cap">wpm · your best</div>
+              <button className="btn primary" onClick={onGoTest} style={{ marginTop: 16 }}>
                 Take a speed test
               </button>
             </>
           )}
         </div>
-        <div className="hero-tile">
-          <div className="hero-num sm">{practiceWpm !== null ? practiceWpm.toFixed(0) : "—"}</div>
-          <div className="hero-unit">wpm in practice</div>
+        <div className="card">
+          <div className="num s">{practiceWpm !== null ? practiceWpm.toFixed(0) : "—"}</div>
+          <div className="cap">wpm in practice</div>
         </div>
-        <div className="hero-tile">
-          <div className="hero-num sm">{accuracy !== null ? (accuracy * 100).toFixed(1) + "%" : "—"}</div>
-          <div className="hero-unit">accuracy</div>
+        <div className="card">
+          <div className="num s">
+            {accuracy !== null ? (accuracy * 100).toFixed(1) + "%" : "—"}
+          </div>
+          <div className="cap">accuracy</div>
         </div>
       </div>
 
-      <div className="panel">
-        <h2>Your goals</h2>
+      <div className="card">
+        <h2>Goals</h2>
         {goals.active.length === 0 ? (
-          <div className="panel-note">Goals appear as soon as there is enough data — keep typing.</div>
+          <div className="note">Goals appear once there is enough data. Keep typing.</div>
         ) : (
-          <div className="goal-list">
+          <div className="goals">
             {goals.active.map((g) => {
               const now = goalNow(g, model, tests, accuracy);
               const p = progressOf(g, now);
               return (
                 <div className="goal" key={g.id}>
-                  <div className="goal-head">
-                    <span className="goal-label">{g.label}</span>
-                    <span className="goal-now">
+                  <div className="top">
+                    <span className="name">{g.label}</span>
+                    <span className="now">
                       {fmtGoalValue(g, now)}
-                      {g.kind !== "first-test" && <span className="goal-target"> → {fmtGoalValue(g, g.target)}</span>}
+                      {g.kind !== "first-test" && (
+                        <span className="to"> / {fmtGoalValue(g, g.target)}</span>
+                      )}
                     </span>
                   </div>
-                  <div className="goal-track">
-                    <div className="goal-fill" style={{ width: `${(p * 100).toFixed(0)}%` }} />
+                  <div className="track">
+                    <div className="fill" style={{ width: `${(p * 100).toFixed(0)}%` }} />
                   </div>
                 </div>
               );
             })}
           </div>
         )}
-        {achievedRecent.length > 0 && (
-          <div className="achieved">
-            <span className="meta-label">
-              achieved · {goals.achieved.length}
-            </span>
-            {achievedRecent.map((g) => (
-              <span className="chip done-chip" key={g.id}>
+        {wonRecent.length > 0 && (
+          <div className="won">
+            <span className="tag">{goals.achieved.length} achieved</span>
+            {wonRecent.map((g) => (
+              <span className="tag win" key={g.id}>
                 ✓ {g.label}
               </span>
             ))}
@@ -155,69 +165,59 @@ export function Progress({
         )}
       </div>
 
-      <div className="two-col">
-        <div className="panel">
-          <h2>Practice speed over time</h2>
-          <TrendChart values={wpmTrend} yLabel="words per minute" formatY={(v) => v.toFixed(0)} yMin={0} />
-          {tests.length > 0 && (
-            <div className="test-history">
-              <span className="meta-label">tests</span>
-              {tests.slice(-6).map((t, i) => (
-                <span className="chip" key={i}>
-                  <b>{t.wpm.toFixed(0)}</b>
-                  <span className="cls">
-                    {new Date(t.time).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
-                  </span>
-                </span>
-              ))}
-            </div>
-          )}
+      <div className="grid-2">
+        <div className="card">
+          <h2>Practice speed</h2>
+          <TrendChart
+            values={wpmTrend}
+            yLabel="words per minute"
+            formatY={(v) => v.toFixed(0)}
+            yMin={0}
+          />
         </div>
 
-        <div className="panel">
+        <div className="card">
           <h2>What's slowing you down</h2>
           {weakPoints.length === 0 ? (
-            <div className="panel-note">
-              Not enough data yet. After a few hundred lines the engine knows exactly which
-              transitions cost you the most.
+            <div className="note">
+              Not enough data yet. After a few hundred lines this names the exact transitions
+              costing you the most time.
             </div>
           ) : (
-            <div className="weak-list">
+            <>
               {weakPoints.map((b) => {
                 const pairGoal = goals.active.find((g) => g.pair === b.bigram);
                 return (
                   <div className="weak" key={b.bigram}>
-                    <span className="weak-pair">{show(b.bigram)}</span>
-                    <span className="weak-desc">
+                    <span className="pair">{show(b.bigram)}</span>
+                    <span className="why">
                       {describePair(b.bigram)}
                       {b.errorRate > 0.05 && " · error-prone"}
                     </span>
-                    <span className="weak-speed">
-                      {b.meanIki.toFixed(0)} ms
-                      {pairGoal && <span className="goal-target"> → {pairGoal.target} ms</span>}
+                    <span className="ms">
+                      {b.meanIki.toFixed(0)}ms
+                      {pairGoal && <span className="to"> → {pairGoal.target}</span>}
                     </span>
                   </div>
                 );
               })}
-            </div>
+              <div className="note">Practice lines are already built around these.</div>
+            </>
           )}
-          <div className="panel-note">
-            Practice lines are already built around these — they fade off this list as you beat them.
-          </div>
         </div>
       </div>
 
-      <div className="panel">
+      <div className="card">
         <h2>Slow keys</h2>
-        <Heatmap keyExcess={keyExcess} darkTheme={darkTheme} />
+        <Heatmap keyExcess={keyExcess} />
       </div>
 
-      <div className="btn-row footer-row">
+      <div className="btn-row">
         <button className="btn" onClick={onExport}>
           Export data
         </button>
-        <button className="btn danger" onClick={onReset}>
-          Reset all data
+        <button className="btn ghost" onClick={onReset}>
+          Reset everything
         </button>
       </div>
     </div>

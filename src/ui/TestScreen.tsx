@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { CharResult, LineResult } from "../core/capture";
 import type { TestRecord } from "../core/persist";
 import { useTypingLine } from "./useTypingLine";
+import { TypedLine } from "./TypedLine";
 
 // dev override: ?testsec=10
 const TEST_SECONDS = Number(new URLSearchParams(window.location.search).get("testsec")) || 60;
@@ -40,7 +41,7 @@ export function TestScreen({ nextPlainLine, onLineData, onDone, bestWpm }: Props
     [nextPlainLine, onLineData],
   );
 
-  const { pos, err, engine } = useTypingLine(line, onComplete, phase !== "done");
+  const { view, engine } = useTypingLine(line, onComplete, phase !== "done");
 
   const finish = useCallback(() => {
     const partial = engine.snapshot();
@@ -74,14 +75,14 @@ export function TestScreen({ nextPlainLine, onLineData, onDone, bestWpm }: Props
 
   // first keystroke starts the clock
   useEffect(() => {
-    if (phase !== "idle" || pos === 0) return;
+    if (phase !== "idle" || view.pos === 0) return;
     setPhase("run");
     const t0 = performance.now();
     timerRef.current = window.setTimeout(() => finishRef.current(), TEST_SECONDS * 1000);
     tickRef.current = window.setInterval(() => {
       setSecondsLeft(Math.max(0, Math.ceil(TEST_SECONDS - (performance.now() - t0) / 1000)));
     }, 250);
-  }, [phase, pos]);
+  }, [phase, view.pos]);
 
   useEffect(() => {
     if (phase === "done") clearTimers();
@@ -104,11 +105,11 @@ export function TestScreen({ nextPlainLine, onLineData, onDone, bestWpm }: Props
     const prevBest = bestAtStart.current;
     const isRecord = prevBest === null || result.wpm > prevBest;
     return (
-      <div className="test-result">
-        <div className="hero-num">{result.wpm.toFixed(0)}</div>
-        <div className="hero-unit">words per minute</div>
-        {isRecord && <div className="record-badge">new personal best</div>}
-        <div className="test-substats">
+      <div className="result">
+        <div className={"big" + (isRecord ? " win" : "")}>{result.wpm.toFixed(0)}</div>
+        <div className="big-unit">words per minute</div>
+        {isRecord && <div className="pb">★ new personal best</div>}
+        <div className="sub-stats">
           <span>
             <b>{(result.accuracy * 100).toFixed(1)}%</b> accuracy
           </span>
@@ -129,23 +130,15 @@ export function TestScreen({ nextPlainLine, onLineData, onDone, bestWpm }: Props
   }
 
   return (
-    <div className="drill">
-      <div className="test-topbar">
+    <div className="stage">
+      <div className="timer-wrap">
         <span className={"timer" + (phase === "run" ? " live" : "")}>
-          {phase === "idle" ? `${TEST_SECONDS}s — starts on your first key` : `${secondsLeft}s`}
+          {phase === "idle" ? `${TEST_SECONDS} seconds · starts when you type` : `${secondsLeft}`}
         </span>
       </div>
-      <div className="line-box">
-        <div className="line" aria-label="text to type">
-          <span className="done">{line.slice(0, pos)}</span>
-          {pos < line.length && <span className={"cur" + (err ? " err" : "")}>{line[pos]}</span>}
-          <span className="todo">{line.slice(pos + 1)}</span>
-        </div>
-      </div>
-      <div className="drill-meta">
-        <span className="meta-label">
-          plain common words, no targeting — this is your official speed
-        </span>
+      <TypedLine text={line} view={view} />
+      <div className="readout">
+        <span className="idle">plain words, nothing targeted — this is your real speed</span>
       </div>
     </div>
   );

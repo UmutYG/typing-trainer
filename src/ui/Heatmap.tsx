@@ -1,103 +1,87 @@
 import { useState } from "react";
 
-// Sequential single-hue coral ramp (Claude accent family), light -> dark,
-// monotonic in lightness so magnitude reads unambiguously.
+// Sequential single-hue ramp on the accent green, dark -> bright: on a near-black
+// surface "more light" reads as "more magnitude".
 const RAMP = [
-  "#f9e9de",
-  "#f5dbc9",
-  "#f0ccb4",
-  "#eabda0",
-  "#e3ad8c",
-  "#db9c78",
-  "#d28a64",
-  "#c97752",
-  "#bd6541",
-  "#a95637",
-  "#93482d",
-  "#7c3b24",
-  "#652f1c",
+  "#16281d",
+  "#1b3626",
+  "#20452f",
+  "#255438",
+  "#2a6341",
+  "#2f734b",
+  "#358355",
+  "#3b945f",
+  "#41a569",
+  "#47b673",
+  "#4ec87e",
+  "#5ad98b",
+  "#74e59f",
 ];
 
 const ROWS = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
 
-interface Props {
-  keyExcess: Map<string, number>; // destination-key mean excess IKI (ms over baseline)
-  darkTheme: boolean;
-}
-
 /**
- * Keyboard heatmap of per-key excess slowness. Sequential single-hue encoding:
- * near-baseline recedes toward the surface, slower keys saturate. On dark
- * surfaces the ramp direction flips so magnitude still reads as "more ink".
+ * Per-key arrival slowness versus your own baseline. Keys you have no data for
+ * stay unpainted.
  */
-export function Heatmap({ keyExcess, darkTheme }: Props) {
+export function Heatmap({ keyExcess }: { keyExcess: Map<string, number> }) {
   const [tip, setTip] = useState<string | null>(null);
-  const vals = [...keyExcess.values()];
-  const max = Math.max(30, ...vals);
+  const max = Math.max(30, ...keyExcess.values());
 
-  const color = (key: string): { bg: string | undefined; fg: string | undefined } => {
+  const paint = (key: string) => {
     const v = keyExcess.get(key);
-    if (v === undefined) return { bg: undefined, fg: undefined };
+    if (v === undefined) return undefined;
     const t = Math.min(1, Math.max(0, v / max));
     const idx = Math.round(t * (RAMP.length - 1));
-    const bg = darkTheme ? RAMP[RAMP.length - 1 - idx] : RAMP[idx];
-    // ink flips against the fill for readability at the extremes
-    const deep = darkTheme ? idx > 5 : idx > 5;
-    const fg = deep ? "#ffffff" : "#0b0b0b";
-    return { bg, fg };
+    return {
+      background: RAMP[idx],
+      borderColor: "transparent",
+      color: idx > 7 ? "#06210f" : "#cfe9d9",
+    };
   };
 
-  const label = (key: string): string => {
+  const label = (key: string) => {
     const v = keyExcess.get(key);
-    if (v === undefined) return `${key === " " ? "space" : key} — no data yet`;
-    const sign = v >= 0 ? "+" : "";
-    return `${key === " " ? "space" : key} — ${sign}${v.toFixed(0)} ms vs your baseline`;
+    const name = key === " " ? "space" : key;
+    if (v === undefined) return `${name} — no data yet`;
+    return `${name} — ${v >= 0 ? "+" : ""}${v.toFixed(0)}ms vs your baseline`;
   };
-
-  const gradient = darkTheme
-    ? `linear-gradient(90deg, ${RAMP[RAMP.length - 1]}, ${RAMP[0]})`
-    : `linear-gradient(90deg, ${RAMP[0]}, ${RAMP[RAMP.length - 1]})`;
 
   return (
     <div>
       <div className="kb" aria-label="keyboard heatmap">
         {ROWS.map((row, ri) => (
           <div className="kb-row" key={ri} style={{ marginLeft: ri * 14 }}>
-            {[...row].map((k) => {
-              const c = color(k);
-              return (
-                <div
-                  key={k}
-                  className="kb-key"
-                  style={c.bg ? { background: c.bg, color: c.fg, borderColor: "transparent" } : undefined}
-                  onMouseEnter={() => setTip(label(k))}
-                  onMouseLeave={() => setTip(null)}
-                >
-                  {k}
-                </div>
-              );
-            })}
+            {[...row].map((k) => (
+              <div
+                key={k}
+                className="kb-key"
+                style={paint(k)}
+                onMouseEnter={() => setTip(label(k))}
+                onMouseLeave={() => setTip(null)}
+              >
+                {k}
+              </div>
+            ))}
           </div>
         ))}
         <div className="kb-row">
-          {(() => {
-            const c = color(" ");
-            return (
-              <div
-                className="kb-key space"
-                style={c.bg ? { background: c.bg, color: c.fg, borderColor: "transparent" } : undefined}
-                onMouseEnter={() => setTip(label(" "))}
-                onMouseLeave={() => setTip(null)}
-              >
-                space
-              </div>
-            );
-          })()}
+          <div
+            className="kb-key space"
+            style={paint(" ")}
+            onMouseEnter={() => setTip(label(" "))}
+            onMouseLeave={() => setTip(null)}
+          >
+            space
+          </div>
         </div>
       </div>
       <div className="kb-legend">
         <span>at your baseline</span>
-        <div className="bar" style={{ background: gradient }} />
+        <div
+          className="bar"
+          style={{ background: `linear-gradient(90deg, ${RAMP[0]}, ${RAMP[RAMP.length - 1]})` }}
+        />
         <span>slower</span>
         <span style={{ marginLeft: "auto", color: "var(--ink-2)" }}>{tip ?? "hover a key"}</span>
       </div>

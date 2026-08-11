@@ -5,24 +5,14 @@ import { SkillModel } from "./core/model";
 import { generateLine, type GeneratedLine } from "./core/generator";
 import type { CharResult, LineResult } from "./core/capture";
 import { lineStats } from "./core/wpm";
-import { emptyGoalState, refreshGoals, type GoalState, type Metrics } from "./core/goals";
+import { emptyGoalState, progressOf, refreshGoals, type GoalState, type Metrics } from "./core/goals";
 import * as persist from "./core/persist";
-import { DrillScreen, type LineFeedback, type TargetInfo } from "./ui/DrillScreen";
+import { DrillScreen, type LineFeedback } from "./ui/DrillScreen";
 import { TestScreen } from "./ui/TestScreen";
-import { Progress } from "./ui/Progress";
+import { Progress, goalNow, fmtGoalValue } from "./ui/Progress";
+import { GoalBanner, type BannerGoal } from "./ui/GoalBanner";
 
 type Tab = "practice" | "test" | "progress";
-type Theme = "oat" | "clay" | "slate";
-
-const THEMES: Theme[] = ["oat", "clay", "slate"];
-
-function loadTheme(): Theme {
-  const stored = localStorage.getItem("tt-theme");
-  if (stored && (THEMES as string[]).includes(stored)) return stored as Theme;
-  // migrate v1 theme names
-  if (stored === "carbon" || stored === "neon") return "slate";
-  return "oat";
-}
 
 export default function App() {
   const corpus = useMemo(() => buildCorpus(wordsRaw), []);
@@ -30,7 +20,6 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("practice");
-  const [theme, setTheme] = useState<Theme>(loadTheme);
   const [line, setLine] = useState<GeneratedLine | null>(null);
   const [feedback, setFeedback] = useState<LineFeedback | null>(null);
   const [sessions, setSessions] = useState<persist.SessionRecord[]>([]);
@@ -39,11 +28,6 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [modelVersion, setModelVersion] = useState(0);
   const toastTimer = useRef<number | null>(null);
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem("tt-theme", theme);
-  }, [theme]);
 
   // console/automation access to the full dataset (model + sessions as JSON)
   useEffect(() => {
@@ -89,7 +73,7 @@ export default function App() {
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(null), 4500);
+    toastTimer.current = window.setTimeout(() => setToast(null), 5000);
   }, []);
 
   const recordIntoModel = useCallback((text: string, chars: CharResult[]) => {
@@ -97,7 +81,7 @@ export default function App() {
     for (let i = 1; i < chars.length; i++) {
       const bigram = text[i - 1] + text[i];
       const c = chars[i];
-      if (c.errorsBefore > 0) model.recordErrors(bigram, c.errorsBefore);
+      if (c.errors > 0) model.recordErrors(bigram, c.errors);
       if (c.timed) model.recordSample(bigram, c.iki, c.rollover);
       else model.recordUntimed(bigram);
     }
@@ -120,7 +104,7 @@ export default function App() {
       };
       setGoals((prev) => {
         const { state, newlyAchieved } = refreshGoals(prev, metrics);
-        if (newlyAchieved.length > 0) showToast(`Goal achieved — ${newlyAchieved[0].label}`);
+        if (newlyAchieved.length > 0) showToast(newlyAchieved[0].label);
         void persist.saveGoals(state);
         return state;
       });
@@ -132,13 +116,7 @@ export default function App() {
     (result: LineResult) => {
       recordIntoModel(result.line, result.chars);
       const stats = lineStats(result);
-      const slowest = result.chars
-        .map((c, i) => ({ c, i }))
-        .filter(({ c, i }) => i >= 1 && c.timed)
-        .sort((a, b) => b.c.iki - a.c.iki)
-        .slice(0, 3)
-        .map(({ c, i }) => ({ bigram: result.line[i - 1] + result.line[i], iki: c.iki }));
-      setFeedback({ stats, slowest });
+      setFeedback({ stats });
 
       const rec: persist.SessionRecord = {
         time: Date.now(),
@@ -193,27 +171,42 @@ export default function App() {
   }, []);
 
   const onReset = useCallback(() => {
-    if (!window.confirm("Delete ALL typing data and start fresh? This cannot be undone.")) return;
+    if (!window.confirm("Delete all typing data and start fresh? This cannot be undone.")) return;
     indexedDB.deleteDatabase("typing-trainer");
     location.reload();
   }, []);
 
-  const targets: TargetInfo[] = useMemo(() => {
-    if (!line) return [];
-    return line.targets.map((bg) => {
-      const s = modelRef.current.bigrams.get(bg);
-      return { bigram: bg, mean: s && s.count > 0 ? s.mean : null };
-    });
+  const accuracyNow = useMemo(() => {
+    const recent = sessions.slice(-50);
+    return recent.length >= 5 ? recent.reduce((a, s) => a + s.accuracy, 0) / recent.length : null;
+  }, [sessions]);
+
+  /** The single goal shown above the typing surface. */
+  const bannerGoal: BannerGoal | null = useMemo(() => {
+    const g = goals.active[0];
+    if (!g) return null;
+    const now = goalNow(g, modelRef.current, tests, accuracyNow);
+    const showNumbers = g.kind !== "first-test";
+    return {
+      label: g.label,
+      progress: progressOf(g, now),
+      now: showNumbers ? fmtGoalValue(g, now) : undefined,
+      target: showNumbers ? fmtGoalValue(g, g.target) : undefined,
+    };
+    // modelVersion keeps pair-speed goals live as the model updates
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [line, modelVersion]);
+  }, [goals, tests, accuracyNow, modelVersion]);
 
   const bestTestWpm = tests.length > 0 ? Math.max(...tests.map((t) => t.wpm)) : null;
 
   return (
     <>
       <div className="header">
-        <h1>typing trainer</h1>
-        <div className="tabs">
+        <span className="brand">
+          <span className="dot" />
+          typing trainer
+        </span>
+        <div className="nav">
           <button className={tab === "practice" ? "active" : ""} onClick={() => setTab("practice")}>
             Practice
           </button>
@@ -225,24 +218,14 @@ export default function App() {
           </button>
         </div>
         <div className="spacer" />
-        <div className="themes">
-          {THEMES.map((t) => (
-            <button
-              key={t}
-              title={t}
-              className={`theme-dot-${t} ${theme === t ? "active" : ""}`}
-              onClick={() => setTheme(t)}
-            />
-          ))}
-        </div>
       </div>
 
-      {toast && <div className="toast">{toast}</div>}
+      {toast && <div className="toast">★ {toast}</div>}
 
       {loadError ? (
         <div className="hint">
           {loadError}
-          <div style={{ marginTop: 14 }}>
+          <div style={{ marginTop: 16 }}>
             <button className="btn" onClick={() => location.reload()}>
               Reload
             </button>
@@ -251,12 +234,14 @@ export default function App() {
       ) : !ready || line === null ? (
         <div className="hint">loading…</div>
       ) : tab === "practice" ? (
-        <DrillScreen
-          lineText={line.text}
-          targets={targets}
-          feedback={feedback}
-          onLineComplete={onLineComplete}
-        />
+        <>
+          <GoalBanner goal={bannerGoal} />
+          <DrillScreen
+            lineText={line.text}
+            feedback={feedback}
+            onLineComplete={onLineComplete}
+          />
+        </>
       ) : tab === "test" ? (
         <TestScreen
           nextPlainLine={nextPlainLine}
@@ -272,7 +257,6 @@ export default function App() {
           tests={tests}
           goals={goals}
           corpus={corpus}
-          darkTheme={theme === "slate"}
           onExport={onExport}
           onReset={onReset}
           onGoTest={() => setTab("test")}

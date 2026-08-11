@@ -74,6 +74,10 @@ function runLine(line: string, events: KeyEventLite[]): LineResult {
   return result!;
 }
 
+function backspace(time: number): KeyEventLite {
+  return { type: "down", key: "Backspace", code: "Backspace", time };
+}
+
 describe("capture engine", () => {
   it("detects rollover when next keydown precedes previous keyup", () => {
     const r = runLine("ab", [
@@ -93,20 +97,6 @@ describe("capture engine", () => {
     expect(r.chars[1].timed).toBe(true);
   });
 
-  it("records errors and invalidates timing after an error", () => {
-    const r = runLine("ab", [
-      down("a", 0),
-      up("a", 40),
-      down("x", 100),
-      up("x", 130), // wrong
-      down("b", 200),
-      up("b", 240), // corrected
-    ]);
-    expect(r.totalErrors).toBe(1);
-    expect(r.chars[1].errorsBefore).toBe(1);
-    expect(r.chars[1].timed).toBe(false);
-  });
-
   it("marks long gaps as untimed pauses", () => {
     const r = runLine("ab", [down("a", 0), up("a", 40), down("b", 4000), up("b", 4040)]);
     expect(r.chars[1].timed).toBe(false);
@@ -116,6 +106,112 @@ describe("capture engine", () => {
     const r = runLine("ab", [down("a", 0), up("a", 40), down("b", 150), up("b", 190)]);
     expect(r.chars[0].timed).toBe(false);
     expect(r.chars[1].timed).toBe(true);
+  });
+});
+
+describe("backspace correction", () => {
+  it("shows the wrong key in place and advances the caret", () => {
+    const eng = new CaptureEngine();
+    eng.setLine("ab");
+    eng.feed(down("a", 0));
+    eng.feed(up("a", 30));
+    eng.feed(down("x", 100)); // wrong, in place of 'b'
+    const v = eng.view();
+    expect(v.pos).toBe(2);
+    expect(v.typed[1]).toBe("x");
+    expect(v.wrong[1]).toBe(true);
+  });
+
+  it("backspace clears the slot and steps the caret back", () => {
+    const eng = new CaptureEngine();
+    eng.setLine("ab");
+    eng.feed(down("a", 0));
+    eng.feed(up("a", 30));
+    eng.feed(down("x", 100));
+    eng.feed(up("x", 130));
+    eng.feed(backspace(200));
+    const v = eng.view();
+    expect(v.pos).toBe(1);
+    expect(v.typed[1]).toBe(null);
+    expect(v.wrong[1]).toBe(false);
+  });
+
+  it("completes the line once the correction is typed, and counts the error", () => {
+    const r = runLine("ab", [
+      down("a", 0),
+      up("a", 30),
+      down("x", 100),
+      up("x", 130), // wrong
+      backspace(200),
+      down("b", 300),
+      up("b", 330), // corrected
+    ]);
+    expect(r.totalErrors).toBe(1);
+    expect(r.chars[1].correct).toBe(true);
+    expect(r.chars[1].errors).toBe(1);
+    // a corrected keystroke must never count toward typing speed
+    expect(r.chars[1].timed).toBe(false);
+  });
+
+  it("a corrected slot also poisons the timing of the next keystroke", () => {
+    const r = runLine("abc", [
+      down("a", 0),
+      up("a", 30),
+      down("x", 100),
+      up("x", 130),
+      backspace(200),
+      down("b", 300),
+      up("b", 330),
+      down("c", 420),
+      up("c", 450),
+    ]);
+    expect(r.chars[2].correct).toBe(true);
+    expect(r.chars[2].timed).toBe(false); // predecessor was retyped, not honest
+  });
+
+  it("keeps timing clean typing that follows a fully recovered stretch", () => {
+    const r = runLine("abcd", [
+      down("a", 0),
+      up("a", 30),
+      down("x", 100),
+      up("x", 130),
+      backspace(200),
+      down("b", 300),
+      up("b", 330),
+      down("c", 420),
+      up("c", 450),
+      down("d", 530),
+      up("d", 560),
+    ]);
+    expect(r.chars[3].timed).toBe(true);
+    expect(r.chars[3].iki).toBe(110);
+  });
+
+  it("can backspace over a correct character and retype it", () => {
+    const r = runLine("ab", [
+      down("a", 0),
+      up("a", 30),
+      down("b", 120),
+      up("b", 150),
+      // line already completed; a fresh engine models mid-line rewind instead
+    ]);
+    expect(r.chars[1].correct).toBe(true);
+
+    const eng = new CaptureEngine();
+    eng.setLine("abc");
+    eng.feed(down("a", 0));
+    eng.feed(down("b", 100));
+    eng.feed(backspace(200));
+    eng.feed(down("b", 300));
+    expect(eng.view().pos).toBe(2);
+    expect(eng.view().wrong[1]).toBe(false);
+  });
+
+  it("ignores backspace at the start of a line", () => {
+    const eng = new CaptureEngine();
+    eng.setLine("ab");
+    eng.feed(backspace(10));
+    expect(eng.view().pos).toBe(0);
   });
 });
 

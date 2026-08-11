@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { CaptureEngine, type LineResult } from "../core/capture";
+import { CaptureEngine, type LineResult, type LineView } from "../core/capture";
+
+const emptyView = (): LineView => ({ pos: 0, typed: [], wrong: [] });
 
 /**
  * Shared typing loop: binds window keydown/keyup to a CaptureEngine for the
@@ -9,23 +11,18 @@ export function useTypingLine(
   lineText: string,
   onComplete: (result: LineResult) => void,
   enabled = true,
-): { pos: number; err: boolean; engine: CaptureEngine } {
+): { view: LineView; engine: CaptureEngine } {
   const engineRef = useRef<CaptureEngine | null>(null);
   if (!engineRef.current) engineRef.current = new CaptureEngine();
-  const [pos, setPos] = useState(0);
-  const [err, setErr] = useState(false);
+  const [view, setView] = useState<LineView>(emptyView);
   const completeRef = useRef(onComplete);
   completeRef.current = onComplete;
 
   useEffect(() => {
     const eng = engineRef.current!;
     eng.setLine(lineText);
-    setPos(0);
-    setErr(false);
-    eng.onProgress = (p, errorAtPos) => {
-      setPos(p);
-      setErr(errorAtPos);
-    };
+    setView(eng.view());
+    eng.onProgress = (v) => setView(v);
     eng.onComplete = (r) => completeRef.current(r);
   }, [lineText]);
 
@@ -33,8 +30,9 @@ export function useTypingLine(
     if (!enabled) return;
     const down = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.repeat) return;
-      if (e.key === " " || e.key.length === 1) e.preventDefault();
+      if (e.repeat && e.key !== "Backspace") return;
+      // backspace would navigate back / space would scroll
+      if (e.key === " " || e.key === "Backspace" || e.key.length === 1) e.preventDefault();
       engineRef.current?.feed({ type: "down", key: e.key, code: e.code, time: performance.now() });
     };
     const up = (e: KeyboardEvent) => {
@@ -48,5 +46,5 @@ export function useTypingLine(
     };
   }, [enabled]);
 
-  return { pos, err, engine: engineRef.current };
+  return { view, engine: engineRef.current };
 }

@@ -1,5 +1,8 @@
-// Keystroke capture: precise inter-key intervals from keydown timestamps,
-// rollover detection from overlapping keydown/keyup, forced-correction errors.
+// Keystroke capture with real-life correction: a wrong key is shown where it
+// happened, backspace deletes it, and you retype. Timing is only collected from
+// keystrokes that were right the first time, so corrections never pollute the
+// speed model.
+//
 // Pure state machine over (type, code, key, time) events so it is fully testable
 // with synthetic streams.
 
@@ -11,11 +14,13 @@ export interface KeyEventLite {
 }
 
 export interface CharResult {
-  char: string;
-  iki: number; // ms since previous correct keydown (0 if untimed)
+  char: string; // the expected character
+  typedChar: string | null; // what is currently sitting in this slot
+  correct: boolean; // final state matches the expected character
+  errors: number; // wrong keystrokes made at this position
+  iki: number; // ms since previous keystroke (0 if untimed)
   timed: boolean; // usable for speed stats
   rollover: boolean;
-  errorsBefore: number; // wrong keystrokes made at this position
 }
 
 export interface LineResult {
@@ -26,9 +31,16 @@ export interface LineResult {
   totalErrors: number;
 }
 
-const PAUSE_MS = 2500; // gaps beyond this are hesitation/pauses, not typing speed
+/** Live view of the line, for rendering. */
+export interface LineView {
+  pos: number;
+  typed: (string | null)[];
+  wrong: boolean[];
+}
 
-const MODIFIER_KEYS = new Set([
+const PAUSE_MS = 2500; // gaps beyond this are hesitation, not typing speed
+
+const IGNORED_KEYS = new Set([
   "Shift",
   "Control",
   "Alt",
@@ -37,35 +49,50 @@ const MODIFIER_KEYS = new Set([
   "Tab",
   "Escape",
   "Enter",
-  "Backspace",
   "ArrowLeft",
   "ArrowRight",
   "ArrowUp",
   "ArrowDown",
+  "Delete",
+  "Home",
+  "End",
 ]);
 
 export class CaptureEngine {
   private line = "";
   private pos = 0;
-  private results: CharResult[] = [];
-  private errorsAtPos = 0;
-  private pressed = new Map<string, number>(); // code -> downTime
-  private prevDown: { code: string; time: number } | null = null;
-  private startTime = 0;
+  private typed: (string | null)[] = [];
+  /** this slot has been mistyped or backspaced into — never counts for speed */
+  private touched: boolean[] = [];
+  private errorCount: number[] = [];
+  private ikis: number[] = [];
+  private timedFlags: boolean[] = [];
+  private rollFlags: boolean[] = [];
+
+  private pressed = new Map<string, number>(); // physical keys currently held
+  private lastDown: { code: string; time: number } | null = null; // for rollover
+  /** previous keystroke considered for timing; null after a correction */
+  private prevClean: { index: number; time: number } | null = null;
+  /** null until the first keystroke — 0 is a legitimate timestamp, so it
+   * cannot double as "not started" */
+  private startTime: number | null = null;
   private totalErrors = 0;
 
-  onProgress: ((pos: number, errorAtPos: boolean) => void) | null = null;
+  onProgress: ((view: LineView) => void) | null = null;
   onComplete: ((result: LineResult) => void) | null = null;
 
   setLine(line: string): void {
     this.line = line;
     this.pos = 0;
-    this.results = [];
-    this.errorsAtPos = 0;
-    this.startTime = 0;
+    this.typed = new Array(line.length).fill(null);
+    this.touched = new Array(line.length).fill(false);
+    this.errorCount = new Array(line.length).fill(0);
+    this.ikis = new Array(line.length).fill(0);
+    this.timedFlags = new Array(line.length).fill(false);
+    this.rollFlags = new Array(line.length).fill(false);
+    this.prevClean = null;
+    this.startTime = null;
     this.totalErrors = 0;
-    // deliberately keep prevDown/pressed: the transition from the last char of
-    // the previous line into the first char of this one is not scored anyway
   }
 
   get position(): number {
@@ -76,14 +103,29 @@ export class CaptureEngine {
     return this.pos < this.line.length;
   }
 
-  /** Wrong keystrokes so far on the current line (for mid-line snapshots). */
-  get errorsSoFar(): number {
-    return this.totalErrors;
+  view(): LineView {
+    return {
+      pos: this.pos,
+      typed: [...this.typed],
+      wrong: this.typed.map((t, i) => t !== null && t !== this.line[i]),
+    };
   }
 
-  /** Partial results for the current line (for a timer expiring mid-line). */
+  /** Partial results for a timer expiring mid-line. */
   snapshot(): { chars: CharResult[]; totalErrors: number } {
-    return { chars: [...this.results], totalErrors: this.totalErrors };
+    return { chars: this.buildChars().slice(0, this.pos), totalErrors: this.totalErrors };
+  }
+
+  private buildChars(): CharResult[] {
+    return this.line.split("").map((ch, i) => ({
+      char: ch,
+      typedChar: this.typed[i],
+      correct: this.typed[i] === ch,
+      errors: this.errorCount[i],
+      iki: this.ikis[i],
+      timed: this.timedFlags[i],
+      rollover: this.rollFlags[i],
+    }));
   }
 
   feed(ev: KeyEventLite): void {
@@ -91,44 +133,60 @@ export class CaptureEngine {
       this.pressed.delete(ev.code);
       return;
     }
-    if (MODIFIER_KEYS.has(ev.key) || ev.key.length !== 1) return;
-    if (!this.active) return;
-
-    const expected = this.line[this.pos];
-    const wasPressed = this.prevDown !== null && this.pressed.has(this.prevDown.code);
-    this.pressed.set(ev.code, ev.time);
-
-    if (ev.key !== expected) {
-      this.errorsAtPos++;
-      this.totalErrors++;
-      this.prevDown = { code: ev.code, time: ev.time };
-      this.onProgress?.(this.pos, true);
+    if (ev.key === "Backspace") {
+      if (this.pos > 0) {
+        this.pos--;
+        this.typed[this.pos] = null;
+        this.touched[this.pos] = true;
+        this.timedFlags[this.pos] = false;
+        this.prevClean = null; // the next keystroke has no honest predecessor
+        this.onProgress?.(this.view());
+      }
       return;
     }
+    if (IGNORED_KEYS.has(ev.key) || ev.key.length !== 1) return;
+    if (!this.active) return;
 
-    if (this.pos === 0) this.startTime = ev.time;
-    const iki = this.prevDown ? ev.time - this.prevDown.time : 0;
+    const i = this.pos;
+    const expected = this.line[i];
+    const correct = ev.key === expected;
+    const rolledOver = this.lastDown !== null && this.pressed.has(this.lastDown.code);
+
+    this.pressed.set(ev.code, ev.time);
+    if (this.startTime === null) this.startTime = ev.time;
+
+    this.typed[i] = ev.key;
+    if (!correct) {
+      this.errorCount[i]++;
+      this.totalErrors++;
+      this.touched[i] = true;
+    }
+
+    // only a first-try-correct keystroke following another first-try-correct
+    // keystroke describes real typing speed
+    const clean = correct && !this.touched[i];
+    const iki = this.prevClean ? ev.time - this.prevClean.time : 0;
     const timed =
-      this.pos > 0 && this.errorsAtPos === 0 && this.prevDown !== null && iki > 0 && iki < PAUSE_MS;
+      clean &&
+      this.prevClean !== null &&
+      this.prevClean.index === i - 1 &&
+      iki > 0 &&
+      iki < PAUSE_MS;
 
-    this.results.push({
-      char: expected,
-      iki: timed ? iki : 0,
-      timed,
-      rollover: timed && wasPressed,
-      errorsBefore: this.errorsAtPos,
-    });
+    this.ikis[i] = timed ? iki : 0;
+    this.timedFlags[i] = timed;
+    this.rollFlags[i] = timed && rolledOver;
 
-    this.errorsAtPos = 0;
-    this.prevDown = { code: ev.code, time: ev.time };
+    this.lastDown = { code: ev.code, time: ev.time };
+    this.prevClean = clean ? { index: i, time: ev.time } : null;
     this.pos++;
-    this.onProgress?.(this.pos, false);
+    this.onProgress?.(this.view());
 
     if (this.pos >= this.line.length) {
       this.onComplete?.({
         line: this.line,
-        chars: this.results,
-        startTime: this.startTime,
+        chars: this.buildChars(),
+        startTime: this.startTime ?? ev.time,
         endTime: ev.time,
         totalErrors: this.totalErrors,
       });

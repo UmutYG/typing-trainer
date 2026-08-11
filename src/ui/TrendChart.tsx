@@ -61,23 +61,23 @@ export function TrendChart({ values, height = 180, yLabel, formatY, yMin, yMax }
       >
         {ticks.map((t, i) => (
           <g key={i}>
-            <line x1={PAD.left} x2={width - PAD.right} y1={y(t)} y2={y(t)} stroke="var(--grid)" strokeWidth={1} />
-            <text x={PAD.left - 8} y={y(t) + 4} textAnchor="end" fontSize={10.5} fill="var(--muted)">
+            <line x1={PAD.left} x2={width - PAD.right} y1={y(t)} y2={y(t)} stroke="var(--line)" strokeWidth={1} />
+            <text x={PAD.left - 8} y={y(t) + 4} textAnchor="end" fontSize={10.5} fill="var(--ink-3)">
               {formatY(t)}
             </text>
           </g>
         ))}
-        <path d={path} fill="none" stroke="var(--series)" strokeWidth={2} strokeLinejoin="round" />
+        <path d={path} fill="none" stroke="var(--accent)" strokeWidth={2} strokeLinejoin="round" />
         {hover && (
           <g>
-            <line x1={hover.px} x2={hover.px} y1={PAD.top} y2={PAD.top + ih} stroke="var(--muted)" strokeWidth={1} strokeDasharray="3 3" />
-            <circle cx={hover.px} cy={hover.py} r={4.5} fill="var(--series)" stroke="var(--surface)" strokeWidth={2} />
+            <line x1={hover.px} x2={hover.px} y1={PAD.top} y2={PAD.top + ih} stroke="var(--ink-3)" strokeWidth={1} strokeDasharray="3 3" />
+            <circle cx={hover.px} cy={hover.py} r={4.5} fill="var(--accent)" stroke="var(--bg)" strokeWidth={2} />
           </g>
         )}
-        <text x={PAD.left} y={height - 5} fontSize={10.5} fill="var(--muted)">
+        <text x={PAD.left} y={height - 5} fontSize={10.5} fill="var(--ink-3)">
           older
         </text>
-        <text x={width - PAD.right} y={height - 5} fontSize={10.5} fill="var(--muted)" textAnchor="end">
+        <text x={width - PAD.right} y={height - 5} fontSize={10.5} fill="var(--ink-3)" textAnchor="end">
           recent
         </text>
       </svg>
