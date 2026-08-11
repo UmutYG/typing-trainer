@@ -1,7 +1,6 @@
 /* Theme tokens. Three complete looks, switchable live via data-theme on <html>.
    Chart colors stay on validated slots per surface (see dataviz palette). */
 
-:root,
 :root[data-theme="carbon"] {
   color-scheme: dark;
   --page: #0d0d0d;
@@ -23,6 +22,7 @@
   --ui-font: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
+:root,
 :root[data-theme="paper"] {
   color-scheme: light;
   --page: #f9f9f7;

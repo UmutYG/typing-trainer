@@ -19,7 +19,7 @@ export default function App() {
   const modelRef = useRef(new SkillModel());
   const [ready, setReady] = useState(false);
   const [tab, setTab] = useState<Tab>("train");
-  const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("tt-theme") as Theme) ?? "carbon");
+  const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("tt-theme") as Theme) ?? "paper");
   const [line, setLine] = useState<GeneratedLine | null>(null);
   const [feedback, setFeedback] = useState<LineFeedback | null>(null);
   const [sessions, setSessions] = useState<persist.SessionRecord[]>([]);
@@ -29,6 +29,11 @@ export default function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("tt-theme", theme);
   }, [theme]);
+
+  // console/automation access to the full dataset (model + sessions as JSON)
+  useEffect(() => {
+    (window as unknown as { dumpData: () => Promise<string> }).dumpData = persist.exportAll;
+  }, []);
 
   const nextLine = useCallback(() => {
     const bns = modelRef.current.bottlenecks(corpus.engFreq, 8);
