@@ -203,6 +203,50 @@ export function classStanding(
 }
 
 /* ------------------------------------------------------------------ *
+ * The shape of your mistakes
+ * ------------------------------------------------------------------ */
+
+export interface ErrorPattern {
+  bigram: string;
+  cls: TransitionClass;
+  /** what you hit instead of the intended key */
+  wrongChar: string;
+  count: number;
+  /** the wrong key was the *next* letter: the hands ran out of order */
+  transposition: boolean;
+  /** a plain sentence describing the fault */
+  say: string;
+}
+
+const show = (bg: string) => bg.replace(/ /g, "␣");
+const showChar = (c: string) => (c === " " ? "␣" : c);
+
+/**
+ * Not "you make mistakes here" but "you hit r when you mean t, and it happens
+ * because both live on the same finger". Transpositions are called out
+ * separately because they are a timing fault, not an aiming one — the fix is
+ * to even out the pair, not to hunt for the key.
+ */
+export function errorPatterns(model: SkillModel, limit = 5): ErrorPattern[] {
+  const out: ErrorPattern[] = [];
+  for (const [bigram, s] of model.bigrams) {
+    if (s.errors < 2) continue;
+    const cls = classifyTransition(bigram[0], bigram[1]);
+    if (!cls) continue;
+    const top = model.topConfusion(bigram);
+    if (!top) continue;
+    const intended = bigram[1];
+    const transposition = s.transposed >= Math.max(2, s.errors * 0.4);
+    const say = transposition
+      ? `you type ${show(bigram[0] + top.char)} before ${showChar(intended)} — the second hand is arriving early`
+      : `you hit ${showChar(top.char)} instead of ${showChar(intended)}`;
+    out.push({ bigram, cls, wrongChar: top.char, count: top.count, transposition, say });
+  }
+  out.sort((a, b) => b.count - a.count);
+  return out.slice(0, limit);
+}
+
+/* ------------------------------------------------------------------ *
  * Session shape
  * ------------------------------------------------------------------ */
 
@@ -233,6 +277,80 @@ export function phaseAt(lineIndex: number): PhaseState {
     n -= p.lines;
   }
   return { phase: "focus", indexInPhase: 0, phaseLines: CYCLE[0].lines };
+}
+
+/* ------------------------------------------------------------------ *
+ * Closing a set
+ * ------------------------------------------------------------------ */
+
+export interface SetChange {
+  pair: string; // display form, spaces shown as ␣
+  from: number;
+  to: number;
+  better: boolean;
+}
+
+export interface SetSummary {
+  title: string;
+  /** the headline: did the work land */
+  verdict: string;
+  /** at most three concrete changes */
+  changes: SetChange[];
+}
+
+const MIN_MOVE_MS = 3; // below this a change is noise, not progress
+
+/**
+ * What a set actually did. This is the only place the app looks backwards, and
+ * it does it in three lines — the point is to see the needle move, then move on.
+ */
+export function summarizeSet(input: {
+  phase: Phase;
+  setNumber: number;
+  targets: string[];
+  before: Map<string, number>;
+  after: Map<string, number>;
+  wpms: number[];
+  prevPhaseWpm: number | null;
+}): SetSummary {
+  const { phase, setNumber, targets, before, after, wpms, prevPhaseWpm } = input;
+  const title = `${PHASE_TITLE[phase]} · set ${setNumber}`;
+  const avg = wpms.length > 0 ? wpms.reduce((a, b) => a + b, 0) / wpms.length : null;
+
+  const moved: { bigram: string; from: number; to: number }[] = [];
+  for (const bg of targets) {
+    const from = before.get(bg);
+    const to = after.get(bg);
+    if (from === undefined || to === undefined) continue;
+    if (Math.abs(from - to) < MIN_MOVE_MS) continue;
+    moved.push({ bigram: bg, from, to });
+  }
+  moved.sort((a, b) => a.to - a.from - (b.to - b.from)); // biggest gain first
+
+  const faster = moved.filter((m) => m.to < m.from).length;
+  const changes: SetChange[] = moved.slice(0, 3).map((m) => ({
+    pair: show(m.bigram),
+    from: Math.round(m.from),
+    to: Math.round(m.to),
+    better: m.to < m.from,
+  }));
+
+  let verdict: string;
+  if (moved.length > 0) {
+    verdict = `${faster} of ${moved.length} faster`;
+  } else if (avg !== null && prevPhaseWpm !== null) {
+    const d = avg - prevPhaseWpm;
+    verdict =
+      Math.abs(d) < 1
+        ? `holding at ${avg.toFixed(0)} wpm`
+        : `${avg.toFixed(0)} wpm, ${d > 0 ? "up" : "down"} ${Math.abs(d).toFixed(0)}`;
+  } else if (avg !== null) {
+    verdict = `${avg.toFixed(0)} wpm`;
+  } else {
+    verdict = "done";
+  }
+
+  return { title, verdict, changes };
 }
 
 export interface Instruction {
@@ -267,8 +385,6 @@ const COACH_PHRASE: Record<TransitionClass, string> = {
   "same-finger": "the pairs where one finger has to fire twice",
 };
 
-const show = (bg: string) => bg.replace(/ /g, "␣");
-
 /**
  * What to do, right now. The only thing the app asks you to hold in your head.
  */
@@ -284,7 +400,7 @@ export function instruct(
     return {
       phase,
       title,
-      say: "Common words, nothing targeted. Let your hands settle — speed comes later in the session.",
+      say: "Settle in. Nothing targeted yet.",
       targets: [],
       lineLength: 52,
       density: 0,
@@ -295,7 +411,7 @@ export function instruct(
     return {
       phase,
       title,
-      say: "Short bursts. Go faster than feels safe and let it be messy — this is where new speed comes from.",
+      say: "Short bursts, faster than feels safe. Messy is fine.",
       targets: [],
       lineLength: 30,
       density: 0,
@@ -308,7 +424,7 @@ export function instruct(
     return {
       phase,
       title,
-      say: "Ease off about ten percent and land every key clean. Accuracy first — the speed keeps itself.",
+      say: "Every key clean. Mistakes have to be fixed before the line moves on.",
       targets: top,
       lineLength: 52,
       density: 0.4,
@@ -318,8 +434,10 @@ export function instruct(
   const phrase = focusClass ? COACH_PHRASE[focusClass] : null;
   const pairs = ranked.slice(0, 3).map((g) => show(g.bigram));
   const say = phrase
-    ? `Right now, ${phrase} are costing you the most time. This set is built around ${pairs.join(", ")}.`
-    : "Nothing is lagging badly — these lines keep the whole keyboard moving.";
+    ? `${capitalize(phrase)} — chasing ${pairs.join(", ")}.`
+    : "Keeping the whole keyboard moving.";
 
   return { phase, title, say, targets: top, lineLength: 56, density: 0.5 };
 }
+
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);

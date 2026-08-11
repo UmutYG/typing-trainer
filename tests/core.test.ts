@@ -215,6 +215,102 @@ describe("backspace correction", () => {
   });
 });
 
+describe("precision mode: nothing wrong is left behind", () => {
+  function engine(line: string) {
+    const eng = new CaptureEngine();
+    let done: LineResult | null = null;
+    eng.onComplete = (r) => (done = r);
+    eng.setLine(line, { requireCorrection: true });
+    return { eng, result: () => done as LineResult | null };
+  }
+
+  it("does not finish the line while a mistake is showing", () => {
+    const { eng, result } = engine("ab");
+    eng.feed(down("a", 0));
+    eng.feed(down("x", 100)); // wrong, where 'b' was due
+    expect(result()).toBeNull();
+    expect(eng.view().fixing).toBe(true);
+  });
+
+  it("sends the caret back to the mistake so it can be retyped", () => {
+    const { eng } = engine("abc");
+    eng.feed(down("a", 0));
+    eng.feed(down("x", 100)); // wrong at index 1
+    eng.feed(down("c", 200)); // right at index 2
+    // typed through, so now it walks back to the one still wrong
+    expect(eng.view().pos).toBe(1);
+    expect(eng.view().fixing).toBe(true);
+  });
+
+  it("finishes once the last mistake is cleared", () => {
+    const { eng, result } = engine("abc");
+    eng.feed(down("a", 0));
+    eng.feed(down("x", 100));
+    eng.feed(down("c", 200));
+    eng.feed(down("b", 300)); // fixes index 1
+    const r = result();
+    expect(r).not.toBeNull();
+    expect(r!.chars.every((c) => c.correct)).toBe(true);
+    expect(r!.totalErrors).toBe(1); // the mistake is still counted
+  });
+
+  it("hops between several mistakes until all are clean", () => {
+    const { eng, result } = engine("abcd");
+    eng.feed(down("x", 0)); // wrong at 0
+    eng.feed(down("b", 100));
+    eng.feed(down("y", 200)); // wrong at 2
+    eng.feed(down("d", 300));
+    expect(eng.view().pos).toBe(0);
+    eng.feed(down("a", 400)); // fix 0 -> jumps to 2
+    expect(eng.view().pos).toBe(2);
+    expect(result()).toBeNull();
+    eng.feed(down("c", 500)); // fix 2 -> done
+    expect(result()).not.toBeNull();
+  });
+
+  it("a corrected line still contributes no speed samples for those slots", () => {
+    const { eng, result } = engine("abc");
+    eng.feed(down("a", 0));
+    eng.feed(down("x", 100));
+    eng.feed(down("c", 200));
+    eng.feed(down("b", 300));
+    const r = result()!;
+    expect(r.chars[1].timed).toBe(false);
+    expect(r.chars[1].errors).toBe(1);
+  });
+
+  it("outside precision mode the line finishes with the mistake left in", () => {
+    const eng = new CaptureEngine();
+    let done: LineResult | null = null;
+    eng.onComplete = (r) => (done = r);
+    eng.setLine("ab"); // no requireCorrection
+    eng.feed(down("a", 0));
+    eng.feed(down("x", 100));
+    expect(done).not.toBeNull();
+    expect(done!.chars[1].correct).toBe(false);
+  });
+});
+
+describe("what the mistake was", () => {
+  it("remembers the wrong key that was hit", () => {
+    const r = runLine("ab", [down("a", 0), down("x", 100), down("b", 200)]);
+    // 'x' was hit at index 1 before 'b' landed there... in free mode the caret
+    // moved on, so index 1 holds 'x'
+    expect(r.chars[1].wrongChars).toEqual(["x"]);
+  });
+
+  it("flags typing the next letter early as a transposition", () => {
+    // line 'the': typing 'e' where 'h' is due is the next-but-one letter
+    const r = runLine("the", [down("t", 0), down("e", 100), down("e", 200)]);
+    expect(r.chars[1].transposed).toBe(true);
+  });
+
+  it("does not call an unrelated wrong key a transposition", () => {
+    const r = runLine("the", [down("t", 0), down("q", 100), down("e", 200)]);
+    expect(r.chars[1].transposed).toBe(false);
+  });
+});
+
 describe("keyboard classification", () => {
   it("classifies physical transition types", () => {
     expect(classifyTransition("x", "c")).toBe("same-hand-roll"); // adjacent fingers, bottom row

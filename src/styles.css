@@ -166,6 +166,70 @@ body {
   color: var(--ink-2);
   max-width: 62ch;
 }
+.setno {
+  color: var(--ink-3);
+  font-weight: 600;
+}
+
+/* the moment between sets */
+.done-phase {
+  color: var(--ink-2);
+}
+.verdict {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.deltas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  animation: fadein 260ms ease;
+}
+.delta {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  color: var(--ink-3);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 12px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.delta b {
+  color: var(--ink);
+  font-weight: 650;
+}
+.delta .arrow {
+  color: var(--dim);
+}
+.delta.better {
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.delta.better .to {
+  color: var(--accent);
+}
+.delta.worse .to {
+  color: var(--ink-2);
+}
+.delta.quiet {
+  font-family: var(--sans);
+  border-color: transparent;
+  color: var(--ink-3);
+  padding-left: 0;
+}
+@keyframes fadein {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
 
 /* ---------------- typing surface ---------------- */
 .stage {
@@ -216,6 +280,10 @@ body {
   100% {
     opacity: 0;
   }
+}
+
+.ambient .fixing {
+  color: var(--bad);
 }
 
 /* present, but never asking for attention */
@@ -469,6 +537,17 @@ body {
 }
 .weak .ms .to {
   color: var(--accent);
+}
+.badge {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 999px;
+  padding: 2px 7px;
 }
 
 /* the chart keeps its own aspect ratio instead of stretching with the card */

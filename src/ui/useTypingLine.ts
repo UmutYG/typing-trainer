@@ -1,15 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { CaptureEngine, type LineResult, type LineView } from "../core/capture";
 
-const emptyView = (): LineView => ({ pos: 0, typed: [], wrong: [] });
+const emptyView = (): LineView => ({ pos: 0, typed: [], wrong: [], fixing: false });
 
 /**
  * Shared typing loop: binds window keydown/keyup to a CaptureEngine for the
- * given line. Both the practice drill and the speed test run on this.
+ * given line.
  */
 export function useTypingLine(
   lineText: string,
   onComplete: (result: LineResult) => void,
+  requireCorrection = false,
   enabled = true,
 ): { view: LineView; engine: CaptureEngine } {
   const engineRef = useRef<CaptureEngine | null>(null);
@@ -20,11 +21,11 @@ export function useTypingLine(
 
   useEffect(() => {
     const eng = engineRef.current!;
-    eng.setLine(lineText);
+    eng.setLine(lineText, { requireCorrection });
     setView(eng.view());
     eng.onProgress = (v) => setView(v);
     eng.onComplete = (r) => completeRef.current(r);
-  }, [lineText]);
+  }, [lineText, requireCorrection]);
 
   useEffect(() => {
     if (!enabled) return;

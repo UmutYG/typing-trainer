@@ -1,15 +1,25 @@
 import { useMemo } from "react";
 import type { SkillModel } from "../core/model";
-import type { SessionRecord } from "../core/persist";
+import type { DayRecord, SessionRecord } from "../core/persist";
 import type { Corpus } from "../core/words";
 import { CLASS_LABELS } from "../core/keyboard";
-import { classStanding, currentLevel, gaps, keyGaps, nextStandard, wpmForIki } from "../core/coach";
+import {
+  classStanding,
+  currentLevel,
+  errorPatterns,
+  gaps,
+  keyGaps,
+  nextStandard,
+  wpmForIki,
+} from "../core/coach";
 import { TrendChart } from "./TrendChart";
 import { Heatmap } from "./Heatmap";
 
 interface Props {
   model: SkillModel;
   sessions: SessionRecord[];
+  /** older per-line rows, folded into daily totals */
+  days: DayRecord[];
   corpus: Corpus;
   onExport: () => void;
   onReset: () => void;
@@ -27,14 +37,20 @@ function rollingMean(values: number[], window: number): number[] {
   return out;
 }
 
-export function Standing({ model, sessions, corpus, onExport, onReset }: Props) {
+export function Standing({ model, sessions, days, corpus, onExport, onReset }: Props) {
   const level = useMemo(() => currentLevel(model, corpus.engFreq), [model, corpus]);
   const tier = nextStandard(level?.wpm ?? null);
   const ranked = useMemo(() => gaps(model, corpus.engFreq, tier), [model, corpus, tier]);
   const classes = useMemo(() => classStanding(model, tier), [model, tier]);
   const kg = useMemo(() => keyGaps(model, tier), [model, tier]);
   const wpmTrend = useMemo(() => rollingMean(sessions.map((s) => s.wpm), 10), [sessions]);
-  const minutesTotal = Math.round(sessions.reduce((a, s) => a + s.ms, 0) / 60000);
+  const mistakes = useMemo(() => errorPatterns(model), [model]);
+  // days holds everything already trimmed out of `sessions`, so the clock
+  // never goes backwards when old rows are compacted away
+  const minutesTotal = Math.round(
+    (sessions.reduce((a, s) => a + s.ms, 0) + days.reduce((a, d) => a + d.ms, 0)) / 60000,
+  );
+  const linesTotal = sessions.length + days.reduce((a, d) => a + d.lines, 0);
 
   return (
     <div className="stack">
@@ -48,7 +64,9 @@ export function Standing({ model, sessions, corpus, onExport, onReset }: Props) 
           </div>
           <div className="stat">
             <div className="num s">{minutesTotal}</div>
-            <div className="cap">{minutesTotal === 1 ? "minute practised" : "minutes practised"}</div>
+            <div className="cap">
+              {minutesTotal === 1 ? "minute practised" : "minutes practised"} · {linesTotal} lines
+            </div>
           </div>
         </div>
         <div className="note">
@@ -107,6 +125,28 @@ export function Standing({ model, sessions, corpus, onExport, onReset }: Props) 
             ))
           )}
           <div className="note">This is what your practice lines are being built from.</div>
+        </div>
+      </div>
+
+      <div className="card">
+        <h2>How your mistakes happen</h2>
+        {mistakes.length === 0 ? (
+          <div className="note">Nothing repeated often enough to call a pattern yet.</div>
+        ) : (
+          mistakes.map((m) => (
+            <div className="weak" key={m.bigram + m.wrongChar}>
+              <span className="pair">{show(m.bigram)}</span>
+              <span className="why">
+                {m.say}
+                {m.transposition && <span className="badge">order</span>}
+              </span>
+              <span className="ms">{m.count}×</span>
+            </div>
+          ))
+        )}
+        <div className="note">
+          Hitting the wrong key is an aiming fault. Typing the right keys in the wrong order is a
+          timing fault — the fix for those is to even out the pair, not to hunt for the key.
         </div>
       </div>
 

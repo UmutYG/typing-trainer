@@ -12,6 +12,10 @@ export interface BigramStat {
   errors: number; // wrong keystrokes made at this transition
   rollover: number; // rollover keystrokes among timed samples
   last: number; // epoch ms of last sample
+  /** what was typed instead, and how often — the shape of the mistake */
+  confusions: Record<string, number>;
+  /** errors that were the *next* character: the hands fired out of order */
+  transposed: number;
 }
 
 export interface Bottleneck {
@@ -29,8 +33,21 @@ const EWMA_FLOOR = 0.1; // after 10 samples, ~last 10-20 dominate: model stays l
 const UNCERTAINTY_K = 10; // pseudo-count pulling unmeasured bigrams into rotation
 const UNCERTAINTY_PRIOR_MS = 45; // assumed excess for an unmeasured transition
 
+/** distinct wrong keys remembered per transition, so the record cannot grow without bound */
+const MAX_CONFUSIONS = 6;
+
 export function newStat(): BigramStat {
-  return { count: 0, mean: 0, m2: 0, attempts: 0, errors: 0, rollover: 0, last: 0 };
+  return {
+    count: 0,
+    mean: 0,
+    m2: 0,
+    attempts: 0,
+    errors: 0,
+    rollover: 0,
+    last: 0,
+    confusions: {},
+    transposed: 0,
+  };
 }
 
 export function updateStat(s: BigramStat, iki: number, rollover: boolean, now = Date.now()): void {
@@ -44,8 +61,11 @@ export function updateStat(s: BigramStat, iki: number, rollover: boolean, now = 
   s.last = now;
 }
 
+/** bumped whenever BigramStat gains a field; deserialize migrates forward */
+export const MODEL_VERSION = 2;
+
 export interface SerializedModel {
-  version: 1;
+  version: number;
   bigrams: Record<string, BigramStat>;
 }
 
@@ -73,9 +93,36 @@ export class SkillModel {
     this.stat(bigram).attempts++;
   }
 
-  /** `wrongCount` wrong keystrokes were made where `bigram` was expected. */
-  recordErrors(bigram: string, wrongCount: number): void {
-    this.stat(bigram).errors += wrongCount;
+  /**
+   * Wrong keystrokes made where `bigram` was expected, along with what was
+   * actually hit — the substitutions are what turn "you make mistakes here"
+   * into "you hit r when you mean t".
+   */
+  recordErrors(
+    bigram: string,
+    wrongCount: number,
+    detail: { wrongChars?: string[]; transposed?: boolean } = {},
+  ): void {
+    const s = this.stat(bigram);
+    s.errors += wrongCount;
+    if (detail.transposed) s.transposed++;
+    for (const ch of detail.wrongChars ?? []) {
+      if (s.confusions[ch] === undefined && Object.keys(s.confusions).length >= MAX_CONFUSIONS) {
+        continue; // keep the record bounded; the common ones are already in
+      }
+      s.confusions[ch] = (s.confusions[ch] ?? 0) + 1;
+    }
+  }
+
+  /** The wrong key most often hit here, if one stands out. */
+  topConfusion(bigram: string): { char: string; count: number } | null {
+    const s = this.bigrams.get(bigram);
+    if (!s) return null;
+    let best: { char: string; count: number } | null = null;
+    for (const [char, count] of Object.entries(s.confusions)) {
+      if (!best || count > best.count) best = { char, count };
+    }
+    return best && best.count >= 2 ? best : null;
   }
 
   /**
@@ -187,12 +234,30 @@ export class SkillModel {
   }
 
   serialize(): SerializedModel {
-    return { version: 1, bigrams: Object.fromEntries(this.bigrams) };
+    return { version: MODEL_VERSION, bigrams: Object.fromEntries(this.bigrams) };
   }
 
+  /**
+   * Loads a model saved by any earlier version of the app. Fields added since
+   * are filled with neutral defaults rather than discarded, and a single
+   * unreadable entry is skipped instead of taking the whole model down —
+   * the years of keystrokes in here are the one thing that cannot be rebuilt.
+   */
   static deserialize(data: SerializedModel): SkillModel {
     const m = new SkillModel();
-    for (const [k, v] of Object.entries(data.bigrams)) m.bigrams.set(k, { ...v });
+    const entries = data && typeof data === "object" ? (data.bigrams ?? {}) : {};
+    for (const [k, raw] of Object.entries(entries)) {
+      if (!raw || typeof raw !== "object") continue;
+      const v = raw as Partial<BigramStat>;
+      if (typeof v.count !== "number" || typeof v.mean !== "number") continue;
+      m.bigrams.set(k, {
+        ...newStat(),
+        ...v,
+        // v1 had no error-shape tracking
+        confusions: typeof v.confusions === "object" && v.confusions !== null ? v.confusions : {},
+        transposed: typeof v.transposed === "number" ? v.transposed : 0,
+      });
+    }
     return m;
   }
 }

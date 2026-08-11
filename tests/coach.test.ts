@@ -7,11 +7,13 @@ import {
   currentLevel,
   dominantClass,
   eliteTarget,
+  errorPatterns,
   gaps,
   ikiForWpm,
   instruct,
   nextStandard,
   phaseAt,
+  summarizeSet,
   wpmForIki,
 } from "../src/core/coach";
 
@@ -143,6 +145,131 @@ describe("what to work on", () => {
   });
 });
 
+describe("the shape of your mistakes", () => {
+  it("says what you hit instead, not just that you erred", () => {
+    const m = modelWith({ th: 120 });
+    m.recordErrors("th", 3, { wrongChars: ["r", "r", "y"] });
+    const [p] = errorPatterns(m);
+    expect(p.wrongChar).toBe("r");
+    expect(p.say).toBe("you hit r instead of h");
+    expect(p.transposition).toBe(false);
+  });
+
+  it("calls out an out-of-order pair as a timing fault, not an aiming one", () => {
+    const m = modelWith({ th: 120 });
+    // typed 'e' where 'h' was due, and 'e' is what came next: t-e-h instead of t-h-e
+    m.recordErrors("th", 1, { wrongChars: ["e"], transposed: true });
+    m.recordErrors("th", 1, { wrongChars: ["e"], transposed: true });
+    m.recordErrors("th", 1, { wrongChars: ["e"], transposed: true });
+    const [p] = errorPatterns(m);
+    expect(p.transposition).toBe(true);
+    expect(p.say).toContain("arriving early");
+  });
+
+  it("ignores one-off slips", () => {
+    const m = modelWith({ th: 120 });
+    m.recordErrors("th", 1, { wrongChars: ["r"] });
+    expect(errorPatterns(m)).toHaveLength(0);
+  });
+
+  it("keeps the confusion record bounded", () => {
+    const m = modelWith({ th: 120 });
+    for (const c of "abcdefghijklmnop") m.recordErrors("th", 1, { wrongChars: [c] });
+    const s = m.bigrams.get("th")!;
+    expect(Object.keys(s.confusions).length).toBeLessThanOrEqual(6);
+    expect(s.errors).toBe(16); // the count itself is never lost
+  });
+});
+
+describe("closing a set", () => {
+  const base = {
+    phase: "focus" as const,
+    setNumber: 3,
+    targets: ["th", "ed"],
+    wpms: [120, 124],
+    prevPhaseWpm: null,
+  };
+
+  it("reports the pairs that moved, fastest gain first", () => {
+    const s = summarizeSet({
+      ...base,
+      before: new Map([
+        ["th", 200],
+        ["ed", 180],
+      ]),
+      after: new Map([
+        ["th", 150],
+        ["ed", 175],
+      ]),
+    });
+    expect(s.title).toBe("Focus · set 3");
+    expect(s.verdict).toBe("2 of 2 faster");
+    expect(s.changes[0]).toEqual({ pair: "th", from: 200, to: 150, better: true });
+  });
+
+  it("marks a pair that slipped so the report stays honest", () => {
+    const s = summarizeSet({
+      ...base,
+      targets: ["th"],
+      before: new Map([["th", 150]]),
+      after: new Map([["th", 190]]),
+    });
+    expect(s.changes[0].better).toBe(false);
+  });
+
+  it("is honest when a pair went backwards", () => {
+    const s = summarizeSet({
+      ...base,
+      before: new Map([["th", 150]]),
+      after: new Map([["th", 190]]),
+    });
+    expect(s.verdict).toBe("0 of 1 faster");
+  });
+
+  it("ignores changes too small to mean anything", () => {
+    const s = summarizeSet({
+      ...base,
+      before: new Map([["th", 150]]),
+      after: new Map([["th", 151]]),
+    });
+    expect(s.changes).toHaveLength(0);
+  });
+
+  it("falls back to speed for sets with no targets", () => {
+    const s = summarizeSet({
+      ...base,
+      phase: "stretch",
+      targets: [],
+      before: new Map(),
+      after: new Map(),
+      wpms: [130, 140],
+      prevPhaseWpm: 128,
+    });
+    expect(s.verdict).toBe("135 wpm, up 7");
+  });
+
+  it("says so plainly when speed is holding steady", () => {
+    const s = summarizeSet({
+      ...base,
+      phase: "stretch",
+      targets: [],
+      before: new Map(),
+      after: new Map(),
+      wpms: [130],
+      prevPhaseWpm: 130.4,
+    });
+    expect(s.verdict).toContain("holding");
+  });
+
+  it("never shows more than three changes at once", () => {
+    const targets = ["th", "ed", "in", "er", "an"];
+    const before = new Map(targets.map((t, i) => [t, 200 + i]));
+    const after = new Map(targets.map((t, i) => [t, 150 + i]));
+    const s = summarizeSet({ ...base, targets, before, after });
+    expect(s.changes.length).toBeLessThanOrEqual(3);
+  });
+});
+
 describe("the shape of a session", () => {
   it("opens with a warm up", () => {
     expect(phaseAt(0).phase).toBe("warmup");
@@ -199,11 +326,10 @@ describe("the coach's instruction", () => {
     expect(ins.targets.length).toBeGreaterThan(0);
     expect(ins.density).toBeGreaterThan(0);
     expect(ins.say).toContain("one finger has to fire twice");
-    // it reads as a sentence, not a label dropped into a slot
-    expect(ins.say).toMatch(/^Right now, the pairs where .+ are costing you the most time\./);
+    expect(ins.say).toContain("th"); // the pairs it is chasing
   });
 
-  it("phrases every movement class so the sentence stays grammatical", () => {
+  it("phrases every movement class so the line stays grammatical", () => {
     const classes = [
       "alternating",
       "space",
@@ -215,15 +341,26 @@ describe("the coach's instruction", () => {
     ] as const;
     for (const cls of classes) {
       const say = instruct(phaseAt(3), ranked, cls).say;
-      expect(say).toMatch(/^Right now, \S.* are costing you the most time\./);
-      expect(say).not.toContain("Right now,  ");
+      // opens with a capital, names pairs after a dash, ends cleanly
+      expect(say).toMatch(/^[A-Z]\S*.* — chasing .+\.$/);
+      expect(say).not.toMatch(/\s{2,}/);
     }
   });
 
-  it("asks for accuracy, not speed, during precision", () => {
+  it("asks for clean keys, not speed, during precision", () => {
     const ins = instruct(phaseAt(15), ranked, "same-finger");
     expect(ins.targets.length).toBeGreaterThan(0);
-    expect(ins.say.toLowerCase()).toContain("accuracy");
+    expect(ins.say.toLowerCase()).toContain("clean");
+    expect(ins.say.toLowerCase()).not.toContain("faster");
+  });
+
+  it("keeps every instruction short enough to read at a glance", () => {
+    // he asked for no long explanations: one short line, always
+    for (const i of [0, 3, 11, 15]) {
+      const say = instruct(phaseAt(i), ranked, "same-finger").say;
+      expect(say.length).toBeLessThanOrEqual(80);
+      expect(say.split(". ").length).toBeLessThanOrEqual(2);
+    }
   });
 
   it("never mentions a score, a goal or a test", () => {
