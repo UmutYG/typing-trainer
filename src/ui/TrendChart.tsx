@@ -50,7 +50,7 @@ export function TrendChart({ values, height = 180, yLabel, formatY, yMin, yMax }
   };
 
   return (
-    <div ref={wrapRef} style={{ position: "relative" }}>
+    <div ref={wrapRef} className="chart-wrap">
       <svg
         viewBox={`0 0 ${width} ${height}`}
         style={{ width: "100%", height: "auto", display: "block" }}

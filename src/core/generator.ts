@@ -3,7 +3,6 @@
 // hand-alternating words that contain it — never keybr-style pseudo-words.
 
 import type { Corpus } from "./words";
-import type { Bottleneck } from "./model";
 
 export interface GeneratorOptions {
   lineLength: number; // target chars per line
@@ -24,6 +23,35 @@ export interface GeneratedLine {
   wordCount: number;
 }
 
+const VOWELS = "aeiou";
+const CONSONANTS = "bcdfghklmnprstvw";
+
+const isVowel = (c: string) => VOWELS.includes(c);
+const pick = (pool: string, rng: () => number) => pool[Math.floor(rng() * pool.length)];
+
+/**
+ * Some transitions barely occur in real English — `xc` lives in a handful of
+ * words, and drilling them would mean typing "except" forever. For those the
+ * generator invents a short pronounceable token that carries the pair, so the
+ * movement can be trained regardless of how rare the vocabulary is. Real words
+ * are still preferred wherever they exist.
+ */
+export function synthesizeWord(bigram: string, rng: () => number = Math.random): string {
+  let w = bigram;
+  // grow outward, alternating vowels and consonants so it stays sayable
+  w = (isVowel(w[0]) ? pick(CONSONANTS, rng) : pick(VOWELS, rng)) + w;
+  const tail = w[w.length - 1];
+  w = w + (isVowel(tail) ? pick(CONSONANTS, rng) : pick(VOWELS, rng));
+  if (rng() < 0.5) {
+    const t2 = w[w.length - 1];
+    w = w + (isVowel(t2) ? pick(CONSONANTS, rng) : pick(VOWELS, rng));
+  }
+  return w;
+}
+
+/** below this many real carriers, a pair is better trained on invented words */
+const MIN_REAL_CARRIERS = 8;
+
 /** Weighted random pick among the most common candidate words (softly favors frequent, real chunks). */
 function pickWord(candidates: number[], rng: () => number): number {
   // candidates are word indices sorted by frequency rank (ascending = more common)
@@ -35,11 +63,11 @@ function pickWord(candidates: number[], rng: () => number): number {
 
 export function generateLine(
   corpus: Corpus,
-  bottlenecks: Bottleneck[],
+  targetBigrams: string[],
   opts: GeneratorOptions = DEFAULT_OPTIONS,
   rng: () => number = Math.random,
 ): GeneratedLine {
-  const targets = bottlenecks.slice(0, opts.topN).map((b) => b.bigram);
+  const targets = targetBigrams.slice(0, opts.topN);
   const words: string[] = [];
   let targetWordCount = 0;
   let length = 0;
@@ -56,7 +84,17 @@ export function generateLine(
       for (let attempt = 0; attempt < targets.length && word === null; attempt++) {
         const bigram = targets[(ti + attempt) % targets.length];
         const candidates = corpus.byBigram.get(bigram);
-        if (candidates && candidates.length > 0) {
+        const rare = !candidates || candidates.length < MIN_REAL_CARRIERS;
+        // boundary pairs (those touching a space) can only come from real words
+        const canSynthesize = rare && !bigram.includes(" ");
+        if (canSynthesize) {
+          const w = synthesizeWord(bigram, rng);
+          if (w !== lastWord) {
+            word = w;
+            targetWordCount++;
+            ti = (ti + attempt + 1) % Math.max(1, targets.length);
+          }
+        } else if (candidates && candidates.length > 0) {
           const idx = pickWord(candidates, rng);
           const w = corpus.words[idx];
           if (w !== lastWord) {

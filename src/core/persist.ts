@@ -2,21 +2,11 @@
 // with JSON export/import for backup.
 
 import type { SerializedModel } from "./model";
-import type { GoalState } from "./goals";
-
-export interface TestRecord {
-  id?: number;
-  time: number; // epoch ms
-  wpm: number;
-  accuracy: number;
-  chars: number;
-  errors: number;
-  seconds: number;
-}
 
 export interface SessionRecord {
   id?: number;
   time: number; // epoch ms
+  ms: number; // how long the line took, for time-practised
   wpm: number;
   accuracy: number;
   rolloverRate: number;
@@ -96,47 +86,19 @@ export function getSessions(): Promise<SessionRecord[]> {
   return tx("sessions", "readonly", (s) => s.getAll() as IDBRequest<SessionRecord[]>);
 }
 
-export function addTest(rec: TestRecord): Promise<IDBValidKey> {
-  return tx("tests", "readwrite", (s) => s.add(rec));
-}
-
-export function getTests(): Promise<TestRecord[]> {
-  return tx("tests", "readonly", (s) => s.getAll() as IDBRequest<TestRecord[]>);
-}
-
-export function saveGoals(goals: GoalState): Promise<IDBValidKey> {
-  return tx("kv", "readwrite", (s) => s.put(goals, "goals"));
-}
-
-export function loadGoals(): Promise<GoalState | undefined> {
-  return tx("kv", "readonly", (s) => s.get("goals") as IDBRequest<GoalState | undefined>);
-}
-
 export async function exportAll(): Promise<string> {
-  const [model, sessions, tests, goals] = await Promise.all([
-    loadModel(),
-    getSessions(),
-    getTests(),
-    loadGoals(),
-  ]);
-  return JSON.stringify({ exportedAt: new Date().toISOString(), model, sessions, tests, goals }, null, 2);
+  const [model, sessions] = await Promise.all([loadModel(), getSessions()]);
+  return JSON.stringify({ exportedAt: new Date().toISOString(), model, sessions }, null, 2);
 }
 
 export async function importAll(json: string): Promise<void> {
   const data = JSON.parse(json) as {
     model?: SerializedModel;
     sessions?: SessionRecord[];
-    tests?: TestRecord[];
-    goals?: GoalState;
   };
   if (data.model) await saveModel(data.model);
-  if (data.goals) await saveGoals(data.goals);
   for (const s of data.sessions ?? []) {
     const { id: _id, ...rest } = s;
     await addSession(rest as SessionRecord);
-  }
-  for (const t of data.tests ?? []) {
-    const { id: _id, ...rest } = t;
-    await addTest(rest as TestRecord);
   }
 }

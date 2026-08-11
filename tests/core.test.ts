@@ -6,7 +6,7 @@ import { newStat, updateStat, SkillModel } from "../src/core/model";
 import { CaptureEngine, type KeyEventLite, type LineResult } from "../src/core/capture";
 import { classifyTransition } from "../src/core/keyboard";
 import { buildCorpus } from "../src/core/words";
-import { generateLine, measureDensity, DEFAULT_OPTIONS } from "../src/core/generator";
+import { generateLine, measureDensity, synthesizeWord, DEFAULT_OPTIONS } from "../src/core/generator";
 import { lineStats } from "../src/core/wpm";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -304,28 +304,80 @@ describe("corpus + generator", () => {
     expect(startT!.every((i) => corpus.words[i].startsWith("t"))).toBe(true);
   });
 
-  it("generates lines with real words hitting target density", () => {
+  it("generates lines hitting the requested target density", () => {
     const rng = lcg(42);
-    const targets = ["xc", "ec", "wa", "ow", "ce"].map((bigram) => ({
-      bigram,
-      score: 1,
-      meanIki: 200,
-      excess: 80,
-      errorRate: 0,
-      freq: 0.01,
-      cls: undefined,
-      count: 10,
-    }));
+    const targets = ["ec", "wa", "ow", "ce", "th"];
     let densitySum = 0;
     const lines = 30;
     for (let i = 0; i < lines; i++) {
       const g = generateLine(corpus, targets, DEFAULT_OPTIONS, rng);
       expect(g.text.length).toBeGreaterThanOrEqual(DEFAULT_OPTIONS.lineLength);
-      for (const w of g.text.split(" ")) expect(corpus.words).toContain(w);
       densitySum += measureDensity(g.text, g.targets);
     }
-    const avgDensity = densitySum / lines;
-    expect(avgDensity).toBeGreaterThan(0.3);
+    expect(densitySum / lines).toBeGreaterThan(0.3);
+  });
+
+  it("uses only real words when the targets are common", () => {
+    const rng = lcg(7);
+    const g = generateLine(corpus, ["th", "er", "in"], DEFAULT_OPTIONS, rng);
+    for (const w of g.text.split(" ")) expect(corpus.words).toContain(w);
+  });
+
+  it("honours a zero density request (untargeted warmup lines)", () => {
+    const rng = lcg(3);
+    const g = generateLine(corpus, [], { ...DEFAULT_OPTIONS, targetDensity: 0 }, rng);
+    expect(g.targetWordCount).toBe(0);
+    for (const w of g.text.split(" ")) expect(corpus.words).toContain(w);
+  });
+
+  it("respects a shorter requested line length", () => {
+    const rng = lcg(11);
+    const g = generateLine(corpus, [], { ...DEFAULT_OPTIONS, lineLength: 30 }, rng);
+    expect(g.text.length).toBeGreaterThanOrEqual(30);
+    expect(g.text.length).toBeLessThan(48);
+  });
+});
+
+describe("invented words for rare transitions", () => {
+  const raw = readFileSync(join(here, "../src/data/words.txt"), "utf8");
+  const corpus = buildCorpus(raw);
+
+  it("builds a pronounceable token that contains the pair", () => {
+    const rng = lcg(5);
+    for (const bg of ["xc", "qv", "zx", "kg"]) {
+      for (let i = 0; i < 12; i++) {
+        const w = synthesizeWord(bg, rng);
+        expect(w).toContain(bg);
+        expect(w.length).toBeGreaterThanOrEqual(bg.length + 2);
+        expect(w).toMatch(/^[a-z]+$/);
+      }
+    }
+  });
+
+  it("falls back to invented words for a pair real English cannot supply", () => {
+    const rng = lcg(21);
+    // no common English word contains 'zq', so it can only be trained invented
+    const g = generateLine(corpus, ["zq"], { ...DEFAULT_OPTIONS, targetDensity: 0.6 }, rng);
+    const invented = g.text.split(" ").filter((w) => w.includes("zq"));
+    expect(invented.length).toBeGreaterThan(0);
+    for (const w of invented) expect(corpus.words).not.toContain(w);
+  });
+
+  it("still prefers real words for an awkward pair that English does supply", () => {
+    const rng = lcg(23);
+    // 'xc' is awkward but lives in except/exchange/exclude, so no inventing
+    for (let i = 0; i < 10; i++) {
+      const g = generateLine(corpus, ["xc"], { ...DEFAULT_OPTIONS, targetDensity: 0.6 }, rng);
+      for (const w of g.text.split(" ")) expect(corpus.words).toContain(w);
+    }
+  });
+
+  it("never invents words for pairs that touch a space", () => {
+    const rng = lcg(31);
+    for (let i = 0; i < 20; i++) {
+      const g = generateLine(corpus, [" q", "q "], { ...DEFAULT_OPTIONS, targetDensity: 0.8 }, rng);
+      for (const w of g.text.split(" ")) expect(corpus.words).toContain(w);
+    }
   });
 });
 

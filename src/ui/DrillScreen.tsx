@@ -3,36 +3,27 @@ import type { LineStats } from "../core/wpm";
 import { useTypingLine } from "./useTypingLine";
 import { TypedLine } from "./TypedLine";
 
-export interface LineFeedback {
-  stats: LineStats;
-}
-
 interface Props {
   lineText: string;
-  feedback: LineFeedback | null;
+  last: LineStats | null;
   onLineComplete: (result: LineResult) => void;
 }
 
-export function DrillScreen({ lineText, feedback, onLineComplete }: Props) {
+/**
+ * The text and your hands. Speed and accuracy are shown but kept deliberately
+ * quiet — there when you glance down, never asking to be chased.
+ */
+export function DrillScreen({ lineText, last, onLineComplete }: Props) {
   const { view } = useTypingLine(lineText, onLineComplete);
-
   return (
     <div className="stage">
       <TypedLine text={lineText} view={view} />
-      <div className="readout">
-        {feedback ? (
+      <div className="ambient">
+        {last && (
           <>
-            <span className="n">
-              {feedback.stats.wpm.toFixed(0)}
-              <span className="u">wpm</span>
-            </span>
-            <span className="n sub">
-              {(feedback.stats.accuracy * 100).toFixed(0)}
-              <span className="u">% accurate</span>
-            </span>
+            <span>{last.wpm.toFixed(0)} wpm</span>
+            <span>{(last.accuracy * 100).toFixed(0)}% clean</span>
           </>
-        ) : (
-          <span className="idle">every line is built from the pairs you are slowest at</span>
         )}
       </div>
     </div>

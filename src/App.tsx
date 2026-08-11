@@ -2,17 +2,25 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import wordsRaw from "./data/words.txt?raw";
 import { buildCorpus } from "./core/words";
 import { SkillModel } from "./core/model";
-import { generateLine, type GeneratedLine } from "./core/generator";
+import { generateLine, DEFAULT_OPTIONS } from "./core/generator";
 import type { CharResult, LineResult } from "./core/capture";
-import { lineStats } from "./core/wpm";
-import { emptyGoalState, progressOf, refreshGoals, type GoalState, type Metrics } from "./core/goals";
+import { lineStats, type LineStats } from "./core/wpm";
+import {
+  currentLevel,
+  dominantClass,
+  gaps,
+  instruct,
+  nextStandard,
+  phaseAt,
+  type Instruction,
+  type PhaseState,
+} from "./core/coach";
 import * as persist from "./core/persist";
-import { DrillScreen, type LineFeedback } from "./ui/DrillScreen";
-import { TestScreen } from "./ui/TestScreen";
-import { Progress, goalNow, fmtGoalValue } from "./ui/Progress";
-import { GoalBanner, type BannerGoal } from "./ui/GoalBanner";
+import { DrillScreen } from "./ui/DrillScreen";
+import { Standing } from "./ui/Standing";
+import { CoachBar } from "./ui/CoachBar";
 
-type Tab = "practice" | "test" | "progress";
+type Tab = "practice" | "standing";
 
 export default function App() {
   const corpus = useMemo(() => buildCorpus(wordsRaw), []);
@@ -20,42 +28,30 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("practice");
-  const [line, setLine] = useState<GeneratedLine | null>(null);
-  const [feedback, setFeedback] = useState<LineFeedback | null>(null);
   const [sessions, setSessions] = useState<persist.SessionRecord[]>([]);
-  const [tests, setTests] = useState<persist.TestRecord[]>([]);
-  const [goals, setGoals] = useState<GoalState>(emptyGoalState);
-  const [toast, setToast] = useState<string | null>(null);
   const [modelVersion, setModelVersion] = useState(0);
-  const toastTimer = useRef<number | null>(null);
+  /** lines completed in this sitting — drives the shape of the session */
+  const [lineIndex, setLineIndex] = useState(0);
+  const [line, setLine] = useState<string | null>(null);
+  const [lastStats, setLastStats] = useState<LineStats | null>(null);
+  const activeTargets = useRef<string[]>([]);
 
-  // console/automation access to the full dataset (model + sessions as JSON)
+  // console/automation access to the full dataset
   useEffect(() => {
     (window as unknown as { dumpData: () => Promise<string> }).dumpData = persist.exportAll;
   }, []);
-
-  const nextLine = useCallback(() => {
-    const bns = modelRef.current.bottlenecks(corpus.engFreq, 8);
-    setLine(generateLine(corpus, bns));
-  }, [corpus]);
-
-  const nextPlainLine = useCallback(() => generateLine(corpus, []).text, [corpus]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [savedModel, savedSessions, savedTests, savedGoals] = await Promise.all([
+        const [savedModel, savedSessions] = await Promise.all([
           persist.loadModel(),
           persist.getSessions(),
-          persist.getTests(),
-          persist.loadGoals(),
         ]);
         if (cancelled) return;
         if (savedModel) modelRef.current = SkillModel.deserialize(savedModel);
         setSessions(savedSessions);
-        setTests(savedTests);
-        setGoals(savedGoals ?? emptyGoalState());
         setReady(true);
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
@@ -66,15 +62,30 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (ready && line === null) nextLine();
-  }, [ready, line, nextLine]);
+  /** What the coach wants from this line. */
+  const { phaseState, instruction } = useMemo(() => {
+    const ps: PhaseState = phaseAt(lineIndex);
+    const level = currentLevel(modelRef.current, corpus.engFreq);
+    const tier = nextStandard(level?.wpm ?? null);
+    const ranked = gaps(modelRef.current, corpus.engFreq, tier);
+    const ins: Instruction = instruct(ps, ranked, dominantClass(ranked));
+    return { phaseState: ps, instruction: ins };
+    // modelVersion keeps the coach's picture current as you type
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lineIndex, corpus, modelVersion]);
 
-  const showToast = useCallback((msg: string) => {
-    setToast(msg);
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(null), 5000);
-  }, []);
+  // build the next line whenever the coach's instruction changes
+  useEffect(() => {
+    if (!ready) return;
+    activeTargets.current = instruction.targets;
+    setLine(
+      generateLine(corpus, instruction.targets, {
+        ...DEFAULT_OPTIONS,
+        lineLength: instruction.lineLength,
+        targetDensity: instruction.density,
+      }).text,
+    );
+  }, [ready, instruction, corpus]);
 
   const recordIntoModel = useCallback((text: string, chars: CharResult[]) => {
     const model = modelRef.current;
@@ -87,76 +98,30 @@ export default function App() {
     }
   }, []);
 
-  const runGoals = useCallback(
-    (sessionsNow: persist.SessionRecord[], testsNow: persist.TestRecord[]) => {
-      const recent = sessionsNow.slice(-50);
-      const metrics: Metrics = {
-        bestTestWpm: testsNow.length > 0 ? Math.max(...testsNow.map((t) => t.wpm)) : null,
-        testCount: testsNow.length,
-        accuracy:
-          recent.length >= 5 ? recent.reduce((a, s) => a + s.accuracy, 0) / recent.length : null,
-        linesTyped: sessionsNow.length,
-        pairStat: (bg) => {
-          const s = modelRef.current.bigrams.get(bg);
-          return s && s.count > 0 ? { mean: s.mean, count: s.count } : null;
-        },
-        bottlenecks: modelRef.current.bottlenecks(corpus.engFreq, 24).filter((b) => b.count >= 10),
-      };
-      setGoals((prev) => {
-        const { state, newlyAchieved } = refreshGoals(prev, metrics);
-        if (newlyAchieved.length > 0) showToast(newlyAchieved[0].label);
-        void persist.saveGoals(state);
-        return state;
-      });
-    },
-    [corpus, showToast],
-  );
-
   const onLineComplete = useCallback(
     (result: LineResult) => {
       recordIntoModel(result.line, result.chars);
       const stats = lineStats(result);
-      setFeedback({ stats });
-
+      setLastStats(stats);
       const rec: persist.SessionRecord = {
         time: Date.now(),
+        ms: Math.max(0, result.endTime - result.startTime),
         wpm: stats.wpm,
         accuracy: stats.accuracy,
         rolloverRate: stats.rolloverRate,
         consistency: stats.consistency,
         chars: result.line.length,
         errors: result.totalErrors,
-        targets: line?.targets ?? [],
-        mode: "drill",
+        targets: activeTargets.current,
+        mode: instruction.phase,
       };
-      const sessionsNow = [...sessions, rec];
-      setSessions(sessionsNow);
+      setSessions((prev) => [...prev, rec]);
       void persist.addSession(rec);
       void persist.saveModel(modelRef.current.serialize());
       setModelVersion((v) => v + 1);
-      runGoals(sessionsNow, tests);
-      nextLine();
+      setLineIndex((i) => i + 1);
     },
-    [line, sessions, tests, recordIntoModel, runGoals, nextLine],
-  );
-
-  const onTestLineData = useCallback(
-    (text: string, chars: CharResult[]) => {
-      recordIntoModel(text, chars);
-      void persist.saveModel(modelRef.current.serialize());
-      setModelVersion((v) => v + 1);
-    },
-    [recordIntoModel],
-  );
-
-  const onTestDone = useCallback(
-    (rec: persist.TestRecord) => {
-      const testsNow = [...tests, rec];
-      setTests(testsNow);
-      void persist.addTest(rec);
-      runGoals(sessions, testsNow);
-    },
-    [tests, sessions, runGoals],
+    [recordIntoModel, instruction.phase],
   );
 
   const onExport = useCallback(async () => {
@@ -176,28 +141,12 @@ export default function App() {
     location.reload();
   }, []);
 
-  const accuracyNow = useMemo(() => {
-    const recent = sessions.slice(-50);
-    return recent.length >= 5 ? recent.reduce((a, s) => a + s.accuracy, 0) / recent.length : null;
+  const minutesToday = useMemo(() => {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const ms = sessions.filter((s) => s.time >= start.getTime()).reduce((a, s) => a + s.ms, 0);
+    return Math.round(ms / 60000);
   }, [sessions]);
-
-  /** The single goal shown above the typing surface. */
-  const bannerGoal: BannerGoal | null = useMemo(() => {
-    const g = goals.active[0];
-    if (!g) return null;
-    const now = goalNow(g, modelRef.current, tests, accuracyNow);
-    const showNumbers = g.kind !== "first-test";
-    return {
-      label: g.label,
-      progress: progressOf(g, now),
-      now: showNumbers ? fmtGoalValue(g, now) : undefined,
-      target: showNumbers ? fmtGoalValue(g, g.target) : undefined,
-    };
-    // modelVersion keeps pair-speed goals live as the model updates
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [goals, tests, accuracyNow, modelVersion]);
-
-  const bestTestWpm = tests.length > 0 ? Math.max(...tests.map((t) => t.wpm)) : null;
 
   return (
     <>
@@ -210,17 +159,12 @@ export default function App() {
           <button className={tab === "practice" ? "active" : ""} onClick={() => setTab("practice")}>
             Practice
           </button>
-          <button className={tab === "test" ? "active" : ""} onClick={() => setTab("test")}>
-            Test
-          </button>
-          <button className={tab === "progress" ? "active" : ""} onClick={() => setTab("progress")}>
-            Progress
+          <button className={tab === "standing" ? "active" : ""} onClick={() => setTab("standing")}>
+            Standing
           </button>
         </div>
         <div className="spacer" />
       </div>
-
-      {toast && <div className="toast">★ {toast}</div>}
 
       {loadError ? (
         <div className="hint">
@@ -235,31 +179,21 @@ export default function App() {
         <div className="hint">loading…</div>
       ) : tab === "practice" ? (
         <>
-          <GoalBanner goal={bannerGoal} />
-          <DrillScreen
-            lineText={line.text}
-            feedback={feedback}
-            onLineComplete={onLineComplete}
+          <CoachBar
+            instruction={instruction}
+            phaseState={phaseState}
+            minutesToday={minutesToday}
           />
+          <DrillScreen lineText={line} last={lastStats} onLineComplete={onLineComplete} />
         </>
-      ) : tab === "test" ? (
-        <TestScreen
-          nextPlainLine={nextPlainLine}
-          onLineData={onTestLineData}
-          onDone={onTestDone}
-          bestWpm={bestTestWpm}
-        />
       ) : (
-        <Progress
+        <Standing
           key={modelVersion}
           model={modelRef.current}
           sessions={sessions}
-          tests={tests}
-          goals={goals}
           corpus={corpus}
           onExport={onExport}
           onReset={onReset}
-          onGoTest={() => setTab("test")}
         />
       )}
     </>
