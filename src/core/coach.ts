@@ -4,7 +4,7 @@
 // coach simply keeps pointing you at whatever is furthest from it.
 
 import { classifyTransition, type TransitionClass } from "./keyboard";
-import type { SkillModel } from "./model";
+import { trendOf, type SkillModel } from "./model";
 
 /* ------------------------------------------------------------------ *
  * Elite standards
@@ -106,7 +106,16 @@ export interface Gap {
   cost: number; // ms lost per unit of real English
   count: number;
   errorRate: number;
+  /** ms this pair has come down lately; positive means practice is landing */
+  trend: number;
 }
+
+/**
+ * How far the coach will follow a hunch about a transition it has barely
+ * measured. A pair seen a handful of times might be much worse than its average
+ * says, and the only way to find out is to put it in front of you.
+ */
+const EXPLORE_C = 0.15;
 
 /**
  * Every measured transition, ranked by what it costs against the standard.
@@ -119,6 +128,14 @@ export interface Gap {
  *
  * An unsteady pair is also lifted: erratic timing means the movement is still
  * being decided rather than executed, and that is exactly what practice fixes.
+ *
+ * Two further terms decide where a minute is best spent rather than merely
+ * where the most time is being lost. A pair that is still coming down under
+ * practice earns more of your attention than one that has settled at the same
+ * distance from the standard — the same minute buys more there. And a pair the
+ * coach has barely measured carries an optimism bonus, because an average taken
+ * from a handful of samples might be hiding something worse. Neither term can
+ * silence a pair: a plateaued transition is weighted down, never dropped.
  */
 export function gaps(
   model: SkillModel,
@@ -130,7 +147,12 @@ export function gaps(
   // anything typed but absent from the word list (punctuation, capitals,
   // invented words) is weighted by how often it actually comes up for you
   let totalAttempts = 0;
-  for (const s of model.bigrams.values()) totalAttempts += s.attempts;
+  let totalSamples = 0;
+  for (const s of model.bigrams.values()) {
+    totalAttempts += s.attempts;
+    totalSamples += s.count;
+  }
+  const logTotal = Math.log(totalSamples + 1);
 
   for (const [bigram, s] of model.bigrams) {
     if (s.count < minCount) continue;
@@ -144,6 +166,12 @@ export function gaps(
     const errorRate = model.errorRate(bigram);
     const sd = Math.sqrt(Math.max(0, s.m2));
     const cv = s.mean > 0 ? Math.min(1, sd / s.mean) : 0;
+    const trend = trendOf(s);
+    // moving half the remaining gap in the recent window counts as fully
+    // responsive; a flat pair keeps a floor of 0.6 rather than falling away
+    const responsiveness = gap > 0 ? Math.max(0, Math.min(1, trend / (gap * 0.5))) : 0;
+    const learn = 0.6 + 0.8 * responsiveness;
+    const optimism = EXPLORE_C * target * Math.sqrt(logTotal / s.count);
     out.push({
       bigram,
       cls,
@@ -151,9 +179,10 @@ export function gaps(
       target,
       gap,
       freq,
-      cost: Math.sqrt(freq) * gap * (1 + 3 * errorRate) * (1 + cv),
+      cost: Math.sqrt(freq) * (gap * learn * (1 + 3 * errorRate) * (1 + cv) + optimism),
       count: s.count,
       errorRate,
+      trend,
     });
   }
   out.sort((a, b) => b.cost - a.cost);
@@ -431,12 +460,52 @@ export function errorPatterns(model: SkillModel, limit = 5): ErrorPattern[] {
 export type Phase = "warmup" | "focus" | "stretch" | "precision";
 
 const WARMUP_LINES = 3;
-const CYCLE: { phase: Phase; lines: number }[] = [
-  { phase: "focus", lines: 8 },
-  { phase: "stretch", lines: 4 },
-  { phase: "precision", lines: 4 },
-];
-const CYCLE_LINES = CYCLE.reduce((a, p) => a + p.lines, 0);
+
+/**
+ * How a sitting is shaped, and the one decision that is yours rather than the
+ * coach's. The coach still chooses every transition you meet and every word you
+ * type — but being told what to do for half an hour with no say in it is the
+ * fastest way to make good practice feel like an obligation. One choice at the
+ * door is enough to make the session yours.
+ */
+export type OpeningKey = "coach" | "loose" | "clean";
+
+const CYCLES: Record<OpeningKey, { phase: Phase; lines: number }[]> = {
+  coach: [
+    { phase: "focus", lines: 8 },
+    { phase: "stretch", lines: 4 },
+    { phase: "precision", lines: 4 },
+  ],
+  loose: [
+    { phase: "stretch", lines: 6 },
+    { phase: "focus", lines: 6 },
+    { phase: "precision", lines: 2 },
+  ],
+  clean: [
+    { phase: "precision", lines: 6 },
+    { phase: "focus", lines: 6 },
+    { phase: "stretch", lines: 2 },
+  ],
+};
+
+export interface Opening {
+  key: OpeningKey;
+  label: string;
+  note: string;
+}
+
+/** The choice offered when a sitting begins. */
+export function openings(lead: TransitionClass | null): Opening[] {
+  return [
+    {
+      key: "coach",
+      label: "Wherever it is worst",
+      note: lead ? capitalize(COACH_PHRASE[lead]) : "Let the coach choose",
+    },
+    { key: "loose", label: "Loose and fast", note: "Bursts above comfort, mess allowed" },
+    { key: "clean", label: "Clean", note: "Nothing wrong left behind" },
+  ];
+}
 
 export interface PhaseState {
   phase: Phase;
@@ -445,16 +514,18 @@ export interface PhaseState {
 }
 
 /** Where a session is in its shape, from the number of lines typed so far. */
-export function phaseAt(lineIndex: number): PhaseState {
+export function phaseAt(lineIndex: number, opening: OpeningKey = "coach"): PhaseState {
   if (lineIndex < WARMUP_LINES) {
     return { phase: "warmup", indexInPhase: lineIndex, phaseLines: WARMUP_LINES };
   }
-  let n = (lineIndex - WARMUP_LINES) % CYCLE_LINES;
-  for (const p of CYCLE) {
+  const cycle = CYCLES[opening] ?? CYCLES.coach;
+  const cycleLines = cycle.reduce((a, p) => a + p.lines, 0);
+  let n = (lineIndex - WARMUP_LINES) % cycleLines;
+  for (const p of cycle) {
     if (n < p.lines) return { phase: p.phase, indexInPhase: n, phaseLines: p.lines };
     n -= p.lines;
   }
-  return { phase: "focus", indexInPhase: 0, phaseLines: CYCLE[0].lines };
+  return { phase: cycle[0].phase, indexInPhase: 0, phaseLines: cycle[0].lines };
 }
 
 /* ------------------------------------------------------------------ *
@@ -556,7 +627,7 @@ const PHASE_TITLE: Record<Phase, string> = {
 };
 
 /** Written to sit inside "Right now, ___ are costing you the most time." */
-const COACH_PHRASE: Record<TransitionClass, string> = {
+export const COACH_PHRASE: Record<TransitionClass, string> = {
   alternating: "your hand switches",
   space: "the moves in and out of the space bar",
   "same-hand-roll": "your same-hand rolls",
@@ -576,16 +647,32 @@ export interface InstructInput {
   announce?: string | null;
   /** the coach has noticed you are tiring */
   tiring?: boolean;
+  /** the last passage of the session: built from what you already own */
+  finishing?: boolean;
+  /** pairs already at the standard, for that last passage */
+  settled?: string[];
 }
 
 /**
  * What to do, right now. The only thing the app asks you to hold in your head.
  */
 export function instruct(input: InstructInput): Instruction {
-  const { phaseState, focus, flow, marks, announce, tiring } = input;
+  const { phaseState, focus, flow, marks, announce, tiring, finishing, settled } = input;
   const { phase } = phaseState;
   const title = PHASE_TITLE[phase];
   const common = { phase, title, marks, capitals: true };
+
+  // finish on something you already own, never on the hardest thing you did
+  if (finishing) {
+    return {
+      ...common,
+      title: "Last one",
+      say: "Nothing to chase here. Just type it.",
+      targets: settled ?? [],
+      lineLength: 150,
+      density: 0.4,
+    };
+  }
 
   if (announce) {
     return { ...common, say: announce, targets: [], lineLength: 150, density: 0 };
@@ -643,8 +730,10 @@ const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 /** A gap this long means you got up and came back: warm up again. */
 export const NEW_SITTING_MS = 20 * 60 * 1000;
 
-/** Around here a session has done its work; the coach offers you the door. */
-export const SESSION_CLOSE_MS = 20 * 60 * 1000;
+/** Before this the coach keeps quiet — a session has barely begun. */
+export const MIN_SESSION_MS = 8 * 60 * 1000;
+/** Past this it offers the door whether or not anything has slipped. */
+export const LONG_SESSION_MS = 35 * 60 * 1000;
 
 /**
  * Whether the recent lines are sliding — slower and messier than the ones
@@ -659,4 +748,86 @@ export function isTiring(recent: { wpm: number; accuracy: number }[]): boolean {
   const wpmDrop = mean(before.map((r) => r.wpm)) - mean(tail.map((r) => r.wpm));
   const accDrop = mean(before.map((r) => r.accuracy)) - mean(tail.map((r) => r.accuracy));
   return wpmDrop > mean(before.map((r) => r.wpm)) * 0.08 && accDrop > 0.01;
+}
+
+/**
+ * When to offer the door. Not a clock: a session should end when another
+ * passage has stopped buying anything, and typing on past that point rehearses
+ * the degraded version of the movement rather than the good one. Slipping speed
+ * *and* slipping accuracy together is the signal — either alone is just you
+ * deliberately changing gear.
+ */
+export function shouldClose(input: {
+  elapsedMs: number;
+  tiring: boolean;
+  atSetBoundary: boolean;
+}): boolean {
+  if (!input.atSetBoundary) return false;
+  if (input.elapsedMs < MIN_SESSION_MS) return false;
+  return input.tiring || input.elapsedMs > LONG_SESSION_MS;
+}
+
+/**
+ * The transitions already at the standard. The last passage of a session is
+ * built from these on purpose: you remember an experience by its best moment
+ * and its last one, not by its average, and there is no reason for the last
+ * thing your hands do today to be the hardest thing they did.
+ */
+export function settledPairs(ranked: Gap[], size = 6): string[] {
+  const settled = ranked.filter((g) => g.gap === 0);
+  const pool = settled.length >= size ? settled : [...ranked].sort((a, b) => a.gap - b.gap);
+  return pool.slice(0, size).map((g) => g.bigram);
+}
+
+/**
+ * The whole standing in one sentence. Everything below it on that page is
+ * detail for when you want detail — this is the part you should be able to read
+ * in two seconds without being a data scientist about it.
+ */
+export function headline(input: {
+  levelWpm: number | null;
+  tier: number;
+  lead: TransitionClass | null;
+}): string {
+  const { levelWpm, tier, lead } = input;
+  if (levelWpm === null) {
+    return "Not enough typing yet to say where you stand. A few more minutes will do it.";
+  }
+  const where = `You are typing at ${levelWpm.toFixed(0)}.`;
+  if (!lead) return `${where} Nothing is far off the standard right now.`;
+  return `${where} ${capitalize(COACH_PHRASE[lead])} are what stand between you and ${tier}.`;
+}
+
+export interface SessionReport {
+  title: string;
+  body: string;
+  /** what moved, and what is waiting — a session that closes cleanly is a
+   *  session with no reason to come back to */
+  thread: string | null;
+}
+
+export function sessionReport(input: {
+  minutes: number;
+  passages: number;
+  changes: SetChange[];
+  nextPhrase: string | null;
+}): SessionReport {
+  const { minutes, passages, changes, nextPhrase } = input;
+  const gains = changes.filter((c) => c.better).sort((a, b) => b.from - b.to - (a.from - a.to));
+  const best = gains[0];
+  const thread = best
+    ? `${best.pair} came down ${Math.round(best.from - best.to)}ms today` +
+      (nextPhrase ? `, and ${nextPhrase} is where we pick up.` : ".")
+    : nextPhrase
+      ? `${capitalize(nextPhrase)} is where we pick up.`
+      : null;
+  const parts: string[] = [];
+  // a session that rounds to zero minutes should not say so
+  if (minutes >= 1) parts.push(`${minutes} ${minutes === 1 ? "minute" : "minutes"}`);
+  parts.push(`${passages} ${passages === 1 ? "passage" : "passages"}`);
+  return {
+    title: "That is a session.",
+    body: `${parts.join(", ")}. The hands keep learning after you walk away.`,
+    thread,
+  };
 }

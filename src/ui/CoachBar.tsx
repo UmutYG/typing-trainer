@@ -7,16 +7,26 @@ interface Props {
   /** shown for the moment between sets: what the last one changed */
   summary: SetSummary | null;
   setNumber: number;
+  /** step back while the hands are moving */
+  receded: boolean;
 }
 
 /**
  * The coach speaking. Between sets it reports what moved; the rest of the time
  * it says only what this set is for. It clears itself the moment you type on.
  */
-export function CoachBar({ instruction, phaseState, minutesToday, summary, setNumber }: Props) {
+export function CoachBar({
+  instruction,
+  phaseState,
+  minutesToday,
+  summary,
+  setNumber,
+  receded,
+}: Props) {
+  const cls = "coach" + (receded ? " receded" : "");
   if (summary) {
     return (
-      <div className="coach">
+      <div className={cls}>
         <div className="coach-head">
           <span className="phase done-phase">{summary.title}</span>
           <span className="verdict">{summary.verdict}</span>
@@ -44,7 +54,7 @@ export function CoachBar({ instruction, phaseState, minutesToday, summary, setNu
 
   const dots = Array.from({ length: phaseState.phaseLines }, (_, i) => i);
   return (
-    <div className="coach">
+    <div className={cls}>
       <div className="coach-head">
         <span className={`phase phase-${instruction.phase}`}>
           {instruction.title} <span className="setno">{setNumber}</span>

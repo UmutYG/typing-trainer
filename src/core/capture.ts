@@ -1,7 +1,10 @@
-// Keystroke capture with real-life correction: a wrong key is shown where it
-// happened, backspace deletes it, and you retype. Timing is only collected from
-// keystrokes that were right the first time, so corrections never pollute the
-// speed model.
+// Keystroke capture over a continuous stream of text. Text is appended in
+// segments; the caret never restarts, so typing is one unbroken run rather than
+// a series of passages. A segment reports itself the moment the caret leaves it.
+//
+// Correction is real-life: a wrong key is shown where it happened, backspace
+// deletes it, and you retype. Timing is only collected from keystrokes that were
+// right the first time, so corrections never pollute the speed model.
 //
 // Pure state machine over (type, code, key, time) events so it is fully testable
 // with synthetic streams.
@@ -35,12 +38,12 @@ export interface LineResult {
   totalErrors: number;
 }
 
-/** Live view of the line, for rendering. */
+/** Live view of the stream, for rendering. */
 export interface LineView {
   pos: number;
   typed: (string | null)[];
   wrong: boolean[];
-  /** true once the line has been typed through but still holds mistakes */
+  /** a wrong character is sitting under the caret and blocking it */
   fixing: boolean;
 }
 
@@ -64,13 +67,19 @@ const IGNORED_KEYS = new Set([
   "End",
 ]);
 
-export interface LineOptions {
+export interface SegmentOptions {
   /**
-   * When true the line will not finish while a wrong letter is still on screen:
-   * after the last character the caret jumps back to each mistake in turn. Used
-   * for precision work, where the point is to leave nothing wrong behind.
+   * When true a wrong key does not let the caret past: it sits there until it is
+   * backspaced away and the right key is typed. Used for precision work, where
+   * the point is to leave nothing wrong behind.
    */
   requireCorrection?: boolean;
+}
+
+interface Segment {
+  start: number;
+  end: number;
+  requireCorrection: boolean;
 }
 
 export class CaptureEngine {
@@ -86,6 +95,12 @@ export class CaptureEngine {
   private timedFlags: boolean[] = [];
   private rollFlags: boolean[] = [];
 
+  /** the appended chunks, in order; the caret is inside `segments[segIndex]` */
+  private segments: Segment[] = [];
+  private segIndex = 0;
+  /** when typing of the current segment began — the previous segment's last key */
+  private segStartTime: number | null = null;
+
   private pressed = new Map<string, number>(); // physical keys currently held
   private lastDown: { code: string; time: number } | null = null; // for rollover
   /** previous keystroke considered for timing; null after a correction */
@@ -94,48 +109,95 @@ export class CaptureEngine {
    * cannot double as "not started" */
   private startTime: number | null = null;
   private lastTime = 0;
-  private totalErrors = 0;
-  private requireCorrection = false;
-  /** the line has been typed to the end and we are now cleaning up mistakes */
-  private fixing = false;
 
   onProgress: ((view: LineView) => void) | null = null;
+  /** fires each time the caret leaves a segment */
   onComplete: ((result: LineResult) => void) | null = null;
 
-  setLine(line: string, opts: LineOptions = {}): void {
-    this.line = line;
+  /** Throw the stream away and start empty. */
+  reset(): void {
+    this.line = "";
     this.pos = 0;
-    this.typed = new Array(line.length).fill(null);
-    this.touched = new Array(line.length).fill(false);
-    this.errorCount = new Array(line.length).fill(0);
-    this.wrongChars = Array.from({ length: line.length }, () => []);
-    this.transposed = new Array(line.length).fill(false);
-    this.ikis = new Array(line.length).fill(0);
-    this.timedFlags = new Array(line.length).fill(false);
-    this.rollFlags = new Array(line.length).fill(false);
+    this.typed = [];
+    this.touched = [];
+    this.errorCount = [];
+    this.wrongChars = [];
+    this.transposed = [];
+    this.ikis = [];
+    this.timedFlags = [];
+    this.rollFlags = [];
+    this.segments = [];
+    this.segIndex = 0;
+    this.segStartTime = null;
     this.prevClean = null;
     this.startTime = null;
-    this.totalErrors = 0;
-    this.requireCorrection = opts.requireCorrection ?? false;
-    this.fixing = false;
+  }
+
+  /**
+   * Add the next stretch of text to the end of the stream. Whatever is already
+   * typed stays where it is — this is what makes the text continuous.
+   */
+  append(text: string, opts: SegmentOptions = {}): void {
+    if (text.length === 0) return;
+    // segments meet at a word boundary, never mid-word
+    const joined = this.line.length > 0 && !/\s$/.test(this.line) && !/^\s/.test(text);
+    const chunk = joined ? " " + text : text;
+    const start = this.line.length;
+
+    this.line += chunk;
+    for (let i = 0; i < chunk.length; i++) {
+      this.typed.push(null);
+      this.touched.push(false);
+      this.errorCount.push(0);
+      this.wrongChars.push([]);
+      this.transposed.push(false);
+      this.ikis.push(0);
+      this.timedFlags.push(false);
+      this.rollFlags.push(false);
+    }
+    this.segments.push({
+      start,
+      end: this.line.length,
+      requireCorrection: opts.requireCorrection ?? false,
+    });
+  }
+
+  /** Reset the stream to a single segment. */
+  setLine(line: string, opts: SegmentOptions = {}): void {
+    this.reset();
+    this.append(line, opts);
   }
 
   get position(): number {
     return this.pos;
   }
 
+  get text(): string {
+    return this.line;
+  }
+
   get active(): boolean {
     return this.pos < this.line.length;
   }
 
-  private firstWrongFrom(start: number): number {
-    for (let i = start; i < this.line.length; i++) {
-      if (this.typed[i] !== this.line[i]) return i;
-    }
-    for (let i = 0; i < start; i++) {
-      if (this.typed[i] !== this.line[i]) return i;
-    }
-    return -1;
+  /** How many segments have been appended — the caller's index space. */
+  get segmentCount(): number {
+    return this.segments.length;
+  }
+
+  /** Where the segment being typed starts — nothing before this can be edited. */
+  private get floor(): number {
+    return this.segments[this.segIndex]?.start ?? 0;
+  }
+
+  private get blocking(): boolean {
+    return this.segments[this.segIndex]?.requireCorrection ?? false;
+  }
+
+  /** A wrong character is under the caret and the caret is not allowed past it. */
+  private get stuck(): boolean {
+    const t = this.typed[this.pos];
+    return this.blocking && t !== null && t !== undefined && t !== this.line[this.pos];
   }
 
   view(): LineView {
@@ -143,13 +205,21 @@ export class CaptureEngine {
       pos: this.pos,
       typed: [...this.typed],
       wrong: this.typed.map((t, i) => t !== null && t !== this.line[i]),
-      fixing: this.fixing,
+      fixing: this.stuck,
     };
   }
 
-  /** Partial results for an interrupted line. */
+  /** Partial results for an interrupted segment. */
   snapshot(): { chars: CharResult[]; totalErrors: number } {
-    return { chars: this.buildChars().slice(0, this.pos), totalErrors: this.totalErrors };
+    const from = this.floor;
+    const chars = this.buildChars().slice(from, this.pos);
+    return { chars, totalErrors: this.errorsIn(from, this.pos) };
+  }
+
+  private errorsIn(from: number, to: number): number {
+    let n = 0;
+    for (let i = from; i < to; i++) n += this.errorCount[i];
+    return n;
   }
 
   private buildChars(): CharResult[] {
@@ -166,14 +236,22 @@ export class CaptureEngine {
     }));
   }
 
-  private finish(time: number): void {
+  /** Hand the finished segment to the coach and move the window to the next. */
+  private emitSegment(time: number): void {
+    const seg = this.segments[this.segIndex];
+    if (!seg) return;
+    const all = this.buildChars();
     this.onComplete?.({
-      line: this.line,
-      chars: this.buildChars(),
-      startTime: this.startTime ?? time,
+      line: this.line.slice(seg.start, seg.end),
+      chars: all.slice(seg.start, seg.end),
+      startTime: this.segStartTime ?? this.startTime ?? time,
       endTime: time,
-      totalErrors: this.totalErrors,
+      totalErrors: this.errorsIn(seg.start, seg.end),
     });
+    this.segIndex++;
+    // the next segment's clock starts where this one stopped, so a continuous
+    // run is measured continuously
+    this.segStartTime = time;
   }
 
   feed(ev: KeyEventLite): void {
@@ -182,7 +260,11 @@ export class CaptureEngine {
       return;
     }
     if (ev.key === "Backspace") {
-      if (this.pos > 0) {
+      if (this.stuck) {
+        // clear the blocking mistake in place; the caret has not moved past it
+        this.typed[this.pos] = null;
+        this.onProgress?.(this.view());
+      } else if (this.pos > this.floor) {
         this.pos--;
         this.typed[this.pos] = null;
         this.touched[this.pos] = true;
@@ -202,12 +284,12 @@ export class CaptureEngine {
 
     this.pressed.set(ev.code, ev.time);
     if (this.startTime === null) this.startTime = ev.time;
+    if (this.segStartTime === null) this.segStartTime = ev.time;
     this.lastTime = ev.time;
 
     this.typed[i] = ev.key;
     if (!correct) {
       this.errorCount[i]++;
-      this.totalErrors++;
       this.touched[i] = true;
       if (this.wrongChars[i].length < 6) this.wrongChars[i].push(ev.key);
       // typing the character that comes next means the hands fired out of order
@@ -232,39 +314,48 @@ export class CaptureEngine {
     this.lastDown = { code: ev.code, time: ev.time };
     this.prevClean = clean ? { index: i, time: ev.time } : null;
 
-    if (this.fixing) {
-      // hop straight to whatever is still wrong
-      const next = this.firstWrongFrom(i + 1);
-      if (next === -1) {
-        this.pos = this.line.length;
-        this.onProgress?.(this.view());
-        this.finish(ev.time);
-        return;
-      }
-      this.pos = next;
+    // precision: the wrong key stays under the caret until it is cleared
+    if (!correct && this.blocking) {
       this.onProgress?.(this.view());
       return;
     }
 
     this.pos++;
 
-    if (this.pos >= this.line.length) {
-      const firstWrong = this.requireCorrection ? this.firstWrongFrom(0) : -1;
-      if (firstWrong === -1) {
-        this.onProgress?.(this.view());
-        this.finish(ev.time);
-        return;
-      }
-      // stay on the line and walk back through the mistakes
-      this.fixing = true;
-      this.pos = firstWrong;
-      this.prevClean = null;
+    const seg = this.segments[this.segIndex];
+    if (seg && this.pos >= seg.end) {
+      this.onProgress?.(this.view());
+      this.emitSegment(ev.time);
+      return;
     }
     this.onProgress?.(this.view());
   }
 
-  /** End the line where it stands (used when the coach moves on). */
+  /**
+   * Abandon the rest of the current segment. What was typed is still reported,
+   * the untyped remainder is dropped, and the stream carries on from here.
+   */
+  skip(): void {
+    const seg = this.segments[this.segIndex];
+    if (!seg || this.pos <= seg.start) return;
+    // drop everything the caret has not reached, including any lookahead
+    this.line = this.line.slice(0, this.pos);
+    this.typed.length = this.pos;
+    this.touched.length = this.pos;
+    this.errorCount.length = this.pos;
+    this.wrongChars.length = this.pos;
+    this.transposed.length = this.pos;
+    this.ikis.length = this.pos;
+    this.timedFlags.length = this.pos;
+    this.rollFlags.length = this.pos;
+    seg.end = this.pos;
+    this.segments.length = this.segIndex + 1;
+    this.emitSegment(this.lastTime);
+    this.onProgress?.(this.view());
+  }
+
+  /** End the current segment where it stands (used when the coach moves on). */
   abort(): void {
-    if (this.startTime !== null) this.finish(this.lastTime);
+    if (this.startTime !== null) this.emitSegment(this.lastTime);
   }
 }

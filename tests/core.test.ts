@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { newStat, updateStat } from "../src/core/model";
 import { CaptureEngine, type KeyEventLite, type LineResult } from "../src/core/capture";
 import { classifyTransition } from "../src/core/keyboard";
+import { rowOf, wrapRows } from "../src/core/wrap";
 import { buildCorpus } from "../src/core/words";
 import {
   DEFAULT_OPTIONS,
@@ -142,8 +143,8 @@ describe("backspace correction", () => {
     expect(v.wrong[1]).toBe(false);
   });
 
-  it("completes the line once the correction is typed, and counts the error", () => {
-    const r = runLine("ab", [
+  it("carries on once the correction is typed, and counts the error", () => {
+    const r = runLine("abc", [
       down("a", 0),
       up("a", 30),
       down("x", 100),
@@ -151,6 +152,8 @@ describe("backspace correction", () => {
       backspace(200),
       down("b", 300),
       up("b", 330), // corrected
+      down("c", 420),
+      up("c", 450),
     ]);
     expect(r.totalErrors).toBe(1);
     expect(r.chars[1].correct).toBe(true);
@@ -221,7 +224,7 @@ describe("backspace correction", () => {
   });
 });
 
-describe("precision mode: nothing wrong is left behind", () => {
+describe("precision mode: the caret does not pass a mistake", () => {
   function engine(line: string) {
     const eng = new CaptureEngine();
     let done: LineResult | null = null;
@@ -230,62 +233,52 @@ describe("precision mode: nothing wrong is left behind", () => {
     return { eng, result: () => done as LineResult | null };
   }
 
-  it("does not finish the line while a mistake is showing", () => {
+  it("holds the caret on the wrong character instead of moving on", () => {
     const { eng, result } = engine("ab");
     eng.feed(down("a", 0));
     eng.feed(down("x", 100)); // wrong, where 'b' was due
     expect(result()).toBeNull();
+    expect(eng.view().pos).toBe(1); // did not advance
+    expect(eng.view().typed[1]).toBe("x"); // but you can see what you hit
     expect(eng.view().fixing).toBe(true);
   });
 
-  it("sends the caret back to the mistake so it can be retyped", () => {
-    const { eng } = engine("abc");
+  it("ignores further keys until the mistake is backspaced away", () => {
+    const { eng, result } = engine("abc");
     eng.feed(down("a", 0));
     eng.feed(down("x", 100)); // wrong at index 1
-    eng.feed(down("c", 200)); // right at index 2
-    // typed through, so now it walks back to the one still wrong
+    eng.feed(down("y", 200)); // still wrong, still stuck
     expect(eng.view().pos).toBe(1);
-    expect(eng.view().fixing).toBe(true);
+    expect(result()).toBeNull();
+    eng.feed(backspace(300));
+    expect(eng.view().typed[1]).toBe(null);
+    expect(eng.view().fixing).toBe(false);
   });
 
-  it("finishes once the last mistake is cleared", () => {
+  it("backspace on a blocking mistake clears in place and does not step back", () => {
+    const { eng } = engine("abc");
+    eng.feed(down("a", 0));
+    eng.feed(down("x", 100));
+    eng.feed(backspace(200));
+    expect(eng.view().pos).toBe(1); // still at the character that is due
+    expect(eng.view().typed[0]).toBe("a"); // the good work behind is untouched
+  });
+
+  it("finishes once the correction is typed, and still counts the error", () => {
     const { eng, result } = engine("abc");
     eng.feed(down("a", 0));
     eng.feed(down("x", 100));
-    eng.feed(down("c", 200));
-    eng.feed(down("b", 300)); // fixes index 1
+    eng.feed(backspace(200));
+    eng.feed(down("b", 300));
+    eng.feed(down("c", 400));
     const r = result();
     expect(r).not.toBeNull();
     expect(r!.chars.every((c) => c.correct)).toBe(true);
     expect(r!.totalErrors).toBe(1); // the mistake is still counted
+    expect(r!.chars[1].timed).toBe(false); // and contributes no speed sample
   });
 
-  it("hops between several mistakes until all are clean", () => {
-    const { eng, result } = engine("abcd");
-    eng.feed(down("x", 0)); // wrong at 0
-    eng.feed(down("b", 100));
-    eng.feed(down("y", 200)); // wrong at 2
-    eng.feed(down("d", 300));
-    expect(eng.view().pos).toBe(0);
-    eng.feed(down("a", 400)); // fix 0 -> jumps to 2
-    expect(eng.view().pos).toBe(2);
-    expect(result()).toBeNull();
-    eng.feed(down("c", 500)); // fix 2 -> done
-    expect(result()).not.toBeNull();
-  });
-
-  it("a corrected line still contributes no speed samples for those slots", () => {
-    const { eng, result } = engine("abc");
-    eng.feed(down("a", 0));
-    eng.feed(down("x", 100));
-    eng.feed(down("c", 200));
-    eng.feed(down("b", 300));
-    const r = result()!;
-    expect(r.chars[1].timed).toBe(false);
-    expect(r.chars[1].errors).toBe(1);
-  });
-
-  it("outside precision mode the line finishes with the mistake left in", () => {
+  it("outside precision mode the caret moves past the mistake", () => {
     const eng = new CaptureEngine();
     let done: LineResult | null = null;
     eng.onComplete = (r) => (done = r);
@@ -294,6 +287,87 @@ describe("precision mode: nothing wrong is left behind", () => {
     eng.feed(down("x", 100));
     expect(done).not.toBeNull();
     expect(done!.chars[1].correct).toBe(false);
+  });
+});
+
+describe("continuous stream", () => {
+  it("appends without disturbing what is already typed", () => {
+    const eng = new CaptureEngine();
+    eng.setLine("ab");
+    eng.feed(down("a", 0));
+    eng.append("cd");
+    expect(eng.text).toBe("ab cd"); // segments join at a word boundary
+    expect(eng.view().pos).toBe(1);
+    expect(eng.view().typed[0]).toBe("a");
+  });
+
+  it("reports each segment as the caret leaves it, and keeps going", () => {
+    const eng = new CaptureEngine();
+    const seen: string[] = [];
+    eng.onComplete = (r) => seen.push(r.line);
+    eng.setLine("ab");
+    eng.append("cd");
+    for (const [k, t] of [
+      ["a", 0],
+      ["b", 100],
+      [" ", 200],
+      ["c", 300],
+      ["d", 400],
+    ] as [string, number][]) {
+      eng.feed(down(k, t, "Key" + k.toUpperCase()));
+    }
+    expect(seen).toEqual(["ab", " cd"]);
+    expect(eng.view().pos).toBe(5);
+  });
+
+  it("measures a segment from where the previous one stopped", () => {
+    const eng = new CaptureEngine();
+    const seen: LineResult[] = [];
+    eng.onComplete = (r) => seen.push(r);
+    eng.setLine("ab");
+    eng.append("cd");
+    eng.feed(down("a", 0));
+    eng.feed(down("b", 100)); // segment 1 ends at t=100
+    eng.feed(down(" ", 200, "Space"));
+    eng.feed(down("c", 300));
+    eng.feed(down("d", 400)); // segment 2 ends at t=400
+    expect(seen[0].startTime).toBe(0);
+    expect(seen[0].endTime).toBe(100);
+    // no gap between them: the run is continuous, so the clock is too
+    expect(seen[1].startTime).toBe(100);
+    expect(seen[1].endTime).toBe(400);
+  });
+
+  it("will not let backspace reach back into a segment already reported", () => {
+    const eng = new CaptureEngine();
+    eng.setLine("ab");
+    eng.append("cd");
+    eng.feed(down("a", 0));
+    eng.feed(down("b", 100));
+    eng.feed(down(" ", 200, "Space"));
+    expect(eng.view().pos).toBe(3);
+    eng.feed(backspace(300));
+    eng.feed(backspace(400));
+    eng.feed(backspace(500));
+    expect(eng.view().pos).toBe(2); // stopped at the segment floor
+    expect(eng.view().typed[1]).toBe("b"); // the reported work is intact
+  });
+
+  it("skip drops the untyped remainder and reports what was done", () => {
+    const eng = new CaptureEngine();
+    const seen: LineResult[] = [];
+    eng.onComplete = (r) => seen.push(r);
+    eng.setLine("abcdef");
+    eng.feed(down("a", 0));
+    eng.feed(down("b", 100));
+    eng.skip();
+    expect(seen).toHaveLength(1);
+    expect(seen[0].line).toBe("ab");
+    expect(eng.text).toBe("ab");
+    // the stream carries on from here rather than starting over
+    eng.append("gh");
+    expect(eng.text).toBe("ab gh");
+    expect(eng.view().pos).toBe(2);
   });
 });
 
@@ -495,5 +569,55 @@ describe("line stats", () => {
     const s = lineStats(r);
     expect(s.wpm).toBeCloseTo(60, 1);
     expect(s.accuracy).toBe(1);
+  });
+});
+
+describe("line breaking", () => {
+  it("never splits a word across rows", () => {
+    const text = "the quick brown fox jumps over the lazy dog again and again";
+    const rows = wrapRows(text, 20);
+    for (let r = 0; r < rows.length; r++) {
+      const to = r + 1 < rows.length ? rows[r + 1] : text.length;
+      const row = text.slice(rows[r], to);
+      // a row either ends the text or ends on the space that broke it
+      if (to < text.length) expect(row.endsWith(" ")).toBe(true);
+      expect(row.trimEnd().includes(" ") || row.trimEnd().length > 0).toBe(true);
+    }
+  });
+
+  it("keeps every character exactly once, in order", () => {
+    const text = "one two three four five six seven eight nine ten eleven";
+    const rows = wrapRows(text, 14);
+    let rebuilt = "";
+    for (let r = 0; r < rows.length; r++) {
+      const to = r + 1 < rows.length ? rows[r + 1] : text.length;
+      rebuilt += text.slice(rows[r], to);
+    }
+    expect(rebuilt).toBe(text);
+  });
+
+  it("respects the column limit", () => {
+    const text = "alpha beta gamma delta epsilon zeta eta theta iota kappa";
+    const cols = 16;
+    const rows = wrapRows(text, cols);
+    for (let r = 0; r < rows.length; r++) {
+      const to = r + 1 < rows.length ? rows[r + 1] : text.length;
+      expect(to - rows[r]).toBeLessThanOrEqual(cols);
+    }
+  });
+
+  it("hard-breaks a word longer than a whole row", () => {
+    const rows = wrapRows("supercalifragilistic x", 8);
+    expect(rows.length).toBeGreaterThan(2);
+    expect(rows[1]).toBe(8);
+  });
+
+  it("finds the row a character sits on", () => {
+    const text = "aaa bbb ccc ddd eee fff";
+    const rows = wrapRows(text, 8);
+    expect(rowOf(rows, 0)).toBe(0);
+    expect(rowOf(rows, rows[1])).toBe(1);
+    expect(rowOf(rows, rows[1] - 1)).toBe(0);
+    expect(rowOf(rows, text.length - 1)).toBe(rows.length - 1);
   });
 });

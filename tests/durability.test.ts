@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { SkillModel, MODEL_VERSION, newStat, type SerializedModel } from "../src/core/model";
+import {
+  SkillModel,
+  MODEL_VERSION,
+  newStat,
+  trendOf,
+  type SerializedModel,
+} from "../src/core/model";
 
 /**
  * The model is months of keystrokes and cannot be rebuilt, so loading it has to
@@ -66,5 +72,49 @@ describe("loading a model saved by an older version", () => {
   it("survives an empty or malformed payload without throwing", () => {
     expect(SkillModel.deserialize({ version: 1, bigrams: {} }).bigrams.size).toBe(0);
     expect(SkillModel.deserialize({} as SerializedModel).bigrams.size).toBe(0);
+  });
+});
+
+describe("model migration", () => {
+  it("carries a version 2 model forward without losing a keystroke", () => {
+    // exactly what an older build wrote: no `slow` field at all
+    const old = {
+      version: 2,
+      bigrams: {
+        th: {
+          count: 120,
+          mean: 118,
+          m2: 400,
+          attempts: 130,
+          errors: 3,
+          rollover: 40,
+          last: 1,
+          confusions: { r: 2 },
+          transposed: 1,
+        },
+      },
+    } as unknown as SerializedModel;
+    const m = SkillModel.deserialize(old);
+    const s = m.bigrams.get("th")!;
+    expect(s.count).toBe(120);
+    expect(s.mean).toBe(118);
+    expect(s.rollover).toBe(40);
+    expect(s.confusions).toEqual({ r: 2 });
+    // the long memory starts level with the recent one, so a migrated pair
+    // reads as "no trend yet" rather than as a huge phantom improvement
+    expect(s.slow).toBe(118);
+    expect(trendOf(s)).toBe(0);
+  });
+
+  it("survives a model saved before error shapes were tracked", () => {
+    const ancient = {
+      version: 1,
+      bigrams: { an: { count: 8, mean: 140, m2: 10, attempts: 8, errors: 0, rollover: 2, last: 0 } },
+    } as unknown as SerializedModel;
+    const s = SkillModel.deserialize(ancient).bigrams.get("an")!;
+    expect(s.count).toBe(8);
+    expect(s.confusions).toEqual({});
+    expect(s.transposed).toBe(0);
+    expect(s.slow).toBe(140);
   });
 });

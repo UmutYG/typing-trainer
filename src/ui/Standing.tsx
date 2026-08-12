@@ -10,6 +10,7 @@ import {
   errorPatterns,
   flowStanding,
   gaps,
+  headline,
   keyGaps,
   marksFor,
   nextStandard,
@@ -48,10 +49,15 @@ export function Standing({ model, sessions, days, corpus, onExport, onReset }: P
   const ranked = useMemo(() => gaps(model, corpus.engFreq, tier), [model, corpus, tier]);
   // the same balanced selection practice uses, so this card is not telling a
   // different story from the lines you are actually being given
+  const focus = useMemo(() => selectFocus(ranked), [ranked]);
   const drilling = useMemo(() => {
-    const picked = new Set(selectFocus(ranked).targets);
+    const picked = new Set(focus.targets);
     return ranked.filter((g) => picked.has(g.bigram));
-  }, [ranked]);
+  }, [ranked, focus]);
+  const say = useMemo(
+    () => headline({ levelWpm: level?.wpm ?? null, tier, lead: focus.cls }),
+    [level, tier, focus],
+  );
   const classes = useMemo(() => classStanding(model, tier), [model, tier]);
   const kg = useMemo(() => keyGaps(model, tier), [model, tier]);
   // daily averages come first so the trend keeps its history after old
@@ -75,6 +81,8 @@ export function Standing({ model, sessions, days, corpus, onExport, onReset }: P
 
   return (
     <div className="stack">
+      <p className="say">{say}</p>
+
       <div className="card">
         <div className="standing-row">
           <div className="stat">

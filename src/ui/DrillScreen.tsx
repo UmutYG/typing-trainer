@@ -1,28 +1,31 @@
-import type { LineResult } from "../core/capture";
+import type { LineView } from "../core/capture";
+import type { Phase } from "../core/coach";
 import type { LineStats } from "../core/wpm";
-import { useTypingLine } from "./useTypingLine";
-import { TypedLine } from "./TypedLine";
+import { ScrollingText } from "./ScrollingText";
 
 interface Props {
-  lineText: string;
+  text: string;
+  view: LineView;
+  phase: Phase;
+  /** precision work: mistakes are marked properly rather than softly */
+  strict: boolean;
   last: LineStats | null;
-  /** precision work: the line will not finish while a mistake is still showing */
-  requireCorrection: boolean;
-  onLineComplete: (result: LineResult) => void;
+  /** the hands are moving right now */
+  typing: boolean;
 }
 
 /**
  * The text and your hands. Speed and accuracy are shown but kept deliberately
- * quiet — there when you glance down, never asking to be chased.
+ * quiet, and they step back further while you are actually typing — a number
+ * that changes under your eyes during a run is something to chase.
  */
-export function DrillScreen({ lineText, last, requireCorrection, onLineComplete }: Props) {
-  const { view } = useTypingLine(lineText, onLineComplete, requireCorrection);
+export function DrillScreen({ text, view, phase, strict, last, typing }: Props) {
   return (
     <div className="stage">
-      <TypedLine text={lineText} view={view} />
-      <div className="ambient">
+      <ScrollingText text={text} view={view} phase={phase} strict={strict} />
+      <div className="ambient" style={{ opacity: typing ? 0.35 : 1 }}>
         {view.fixing ? (
-          <span className="fixing">clear the red letters to finish</span>
+          <span className="fixing">clear it before the caret will move</span>
         ) : (
           last && (
             <>
@@ -31,6 +34,9 @@ export function DrillScreen({ lineText, last, requireCorrection, onLineComplete 
             </>
           )
         )}
+        <span className="hintkey">
+          <kbd>esc</kbd>skip this one
+        </span>
       </div>
     </div>
   );

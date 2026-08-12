@@ -10,13 +10,18 @@ import {
   errorPatterns,
   flowStanding,
   gaps,
+  headline,
   ikiForWpm,
   instruct,
   isTiring,
   marksFor,
   nextStandard,
+  openings,
   phaseAt,
   selectFocus,
+  sessionReport,
+  settledPairs,
+  shouldClose,
   summarizeSet,
   unlockLevel,
   wpmForIki,
@@ -555,5 +560,174 @@ describe("the coach's instruction", () => {
         expect(line).not.toContain(word);
       }
     }
+  });
+});
+
+/** A pair with a controlled number of samples at a controlled speed. */
+function seed(m: SkillModel, bigram: string, iki: number, n: number) {
+  for (let i = 0; i < n; i++) m.recordSample(bigram, iki, false);
+}
+
+describe("optimism about what has barely been measured", () => {
+  it("ranks a thinly-sampled pair above an identical well-known one", () => {
+    const m = new SkillModel();
+    const freq = new Map([
+      ["th", 0.02],
+      ["nd", 0.02],
+    ]);
+    seed(m, "th", 160, 400); // long since settled at this speed
+    seed(m, "nd", 160, 8); // same speed, but the coach has barely seen it
+    const ranked = gaps(m, freq, 140);
+    const th = ranked.find((g) => g.bigram === "th")!;
+    const nd = ranked.find((g) => g.bigram === "nd")!;
+    expect(nd.cost).toBeGreaterThan(th.cost);
+  });
+
+  it("but the bonus fades as the pair becomes known", () => {
+    const thin = new SkillModel();
+    const known = new SkillModel();
+    const freq = new Map([["nd", 0.02]]);
+    seed(thin, "nd", 160, 8);
+    seed(known, "nd", 160, 400);
+    const a = gaps(thin, freq, 140)[0].cost;
+    const b = gaps(known, freq, 140)[0].cost;
+    expect(a).toBeGreaterThan(b);
+    // and it never dominates: the pair is the same distance off either way
+    expect(a).toBeLessThan(b * 2.2);
+  });
+});
+
+describe("where a minute buys the most", () => {
+  it("prefers a pair still coming down over one that has settled", () => {
+    const freq = new Map([
+      ["th", 0.02],
+      ["nd", 0.02],
+    ]);
+    const m = new SkillModel();
+    // 'th' has sat at 170 forever; 'nd' arrived at 170 from much slower
+    seed(m, "th", 170, 300);
+    seed(m, "nd", 260, 200);
+    seed(m, "nd", 170, 40);
+    const ranked = gaps(m, freq, 140);
+    const th = ranked.find((g) => g.bigram === "th")!;
+    const nd = ranked.find((g) => g.bigram === "nd")!;
+    // the comparison only means anything between pairs held to the same
+    // standard, so the premise is that these are the same kind of movement
+    expect(th.cls).toBe(nd.cls);
+    expect(th.target).toBeCloseTo(nd.target, 6);
+    expect(nd.trend).toBeGreaterThan(0);
+    expect(Math.abs(th.trend)).toBeLessThan(nd.trend);
+    expect(nd.cost).toBeGreaterThan(th.cost);
+  });
+
+  it("never abandons a plateaued pair entirely", () => {
+    const m = new SkillModel();
+    seed(m, "ab", 240, 300); // flat, and a long way off the standard
+    const ranked = gaps(m, new Map([["ab", 0.02]]), 140);
+    expect(ranked[0].cost).toBeGreaterThan(0);
+  });
+});
+
+describe("knowing when to stop", () => {
+  it("says nothing until a session has actually happened", () => {
+    expect(
+      shouldClose({ elapsedMs: 4 * 60 * 1000, tiring: true, atSetBoundary: true }),
+    ).toBe(false);
+  });
+
+  it("offers the door once the work has started costing more than it buys", () => {
+    expect(
+      shouldClose({ elapsedMs: 14 * 60 * 1000, tiring: true, atSetBoundary: true }),
+    ).toBe(true);
+  });
+
+  it("waits for a set to finish rather than cutting in mid-set", () => {
+    expect(
+      shouldClose({ elapsedMs: 40 * 60 * 1000, tiring: true, atSetBoundary: false }),
+    ).toBe(false);
+  });
+
+  it("offers it eventually even to someone showing no sign of tiring", () => {
+    expect(
+      shouldClose({ elapsedMs: 40 * 60 * 1000, tiring: false, atSetBoundary: true }),
+    ).toBe(true);
+  });
+});
+
+describe("the last passage, and the way out", () => {
+  it("builds the closing passage from pairs already at the standard", () => {
+    const m = new SkillModel();
+    const freq = new Map([
+      ["ab", 0.02],
+      ["cd", 0.02],
+    ]);
+    seed(m, "ab", 300, 60); // nowhere near
+    seed(m, "cd", 40, 60); // comfortably inside the standard
+    const settled = settledPairs(gaps(m, freq, 140), 1);
+    expect(settled).toEqual(["cd"]);
+  });
+
+  it("leaves a thread hanging rather than closing the loop", () => {
+    const r = sessionReport({
+      minutes: 22,
+      passages: 40,
+      changes: [{ pair: "nd", from: 150, to: 138, better: true }],
+      nextPhrase: "your same-hand rolls",
+    });
+    expect(r.thread).toContain("nd");
+    expect(r.thread).toContain("12ms");
+    expect(r.thread).toContain("pick up");
+  });
+
+  it("still has something to say on a session where nothing measurably moved", () => {
+    const r = sessionReport({
+      minutes: 9,
+      passages: 12,
+      changes: [],
+      nextPhrase: "your hand switches",
+    });
+    expect(r.thread).not.toBeNull();
+    expect(r.body).toContain("9 minutes");
+  });
+});
+
+describe("the one choice that is yours", () => {
+  it("offers three shapes of session, always including the coach's own", () => {
+    const o = openings("same-finger");
+    expect(o).toHaveLength(3);
+    expect(o[0].key).toBe("coach");
+    expect(o.map((x) => x.key)).toEqual(["coach", "loose", "clean"]);
+  });
+
+  it("each opening leads with different work after the warm up", () => {
+    expect(phaseAt(3, "coach").phase).toBe("focus");
+    expect(phaseAt(3, "loose").phase).toBe("stretch");
+    expect(phaseAt(3, "clean").phase).toBe("precision");
+  });
+
+  it("every opening still cycles through all three kinds of work", () => {
+    for (const key of ["coach", "loose", "clean"] as const) {
+      const seen = new Set<string>();
+      for (let i = 3; i < 40; i++) seen.add(phaseAt(i, key).phase);
+      expect(seen).toEqual(new Set(["focus", "stretch", "precision"]));
+    }
+  });
+});
+
+describe("the standing, in one sentence", () => {
+  it("names where you are and what is in the way", () => {
+    const s = headline({ levelWpm: 118, tier: 140, lead: "same-finger" });
+    expect(s).toContain("118");
+    expect(s).toContain("140");
+    expect(s).toContain("one finger");
+  });
+
+  it("admits when it does not know yet", () => {
+    expect(headline({ levelWpm: null, tier: 120, lead: null })).toContain("Not enough");
+  });
+
+  it("stays short enough to read in one glance", () => {
+    const s = headline({ levelWpm: 118, tier: 140, lead: "same-hand-stretch" });
+    expect(s.length).toBeLessThan(130);
   });
 });

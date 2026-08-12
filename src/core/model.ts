@@ -5,6 +5,13 @@
 export interface BigramStat {
   count: number; // timed, correct samples
   mean: number; // EWMA of inter-key interval, ms
+  /**
+   * The same average over a much longer memory. On its own it says nothing;
+   * held against `mean` it says which way this transition is moving, and how
+   * fast — which is what separates a pair that is still responding to practice
+   * from one that has settled and would only be ground at.
+   */
+  slow: number;
   m2: number; // EW variance accumulator
   attempts: number; // positions attempted (correct completions of this transition)
   errors: number; // wrong keystrokes made at this transition
@@ -17,6 +24,8 @@ export interface BigramStat {
 }
 
 const EWMA_FLOOR = 0.1; // after 10 samples, ~last 10-20 dominate: model stays live
+/** the long memory: roughly the last 50 samples, for comparison against `mean` */
+const EWMA_SLOW = 0.02;
 
 /** distinct wrong keys remembered per transition, so the record cannot grow without bound */
 const MAX_CONFUSIONS = 6;
@@ -25,6 +34,7 @@ export function newStat(): BigramStat {
   return {
     count: 0,
     mean: 0,
+    slow: 0,
     m2: 0,
     attempts: 0,
     errors: 0,
@@ -42,12 +52,23 @@ export function updateStat(s: BigramStat, iki: number, rollover: boolean, now = 
   const incr = alpha * diff;
   s.mean += incr;
   s.m2 = (1 - alpha) * (s.m2 + diff * incr);
+  const slowAlpha = Math.max(1 / s.count, EWMA_SLOW);
+  s.slow += slowAlpha * (iki - s.slow);
   if (rollover) s.rollover++;
   s.last = now;
 }
 
+/**
+ * How much this transition has improved lately, in ms — the long average minus
+ * the recent one. Positive means it is still getting faster under practice.
+ */
+export function trendOf(s: BigramStat): number {
+  if (s.count < 12) return 0; // not enough history for the two averages to differ
+  return s.slow - s.mean;
+}
+
 /** bumped whenever BigramStat gains a field; deserialize migrates forward */
-export const MODEL_VERSION = 2;
+export const MODEL_VERSION = 3;
 
 export interface SerializedModel {
   version: number;
@@ -139,6 +160,9 @@ export class SkillModel {
         // v1 had no error-shape tracking
         confusions: typeof v.confusions === "object" && v.confusions !== null ? v.confusions : {},
         transposed: typeof v.transposed === "number" ? v.transposed : 0,
+        // v2 had no long memory: seed it level with the recent one, so a
+        // migrated pair reads as "no trend yet" rather than "improving hugely"
+        slow: typeof v.slow === "number" ? v.slow : v.mean,
       });
     }
     return m;
