@@ -470,6 +470,40 @@ body {
 .standing-row .cap {
   margin-top: 10px;
 }
+.flowrow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+}
+.flowrow .note {
+  margin-top: 10px;
+}
+.stagerow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.tag {
+  font-size: 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 11px;
+  color: var(--ink-3);
+}
+.tag.win {
+  font-family: var(--mono);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+@media (max-width: 840px) {
+  .flowrow {
+    grid-template-columns: 1fr;
+  }
+}
 .classrow {
   display: grid;
   grid-template-columns: 132px 1fr 96px;
@@ -642,6 +676,26 @@ body {
   color: var(--ink-3);
   font-size: 13.5px;
   padding-top: 40px;
+}
+
+/* the end of a session */
+.close-card {
+  text-align: center;
+  padding-top: 12vh;
+  animation: fadein 400ms ease;
+}
+.close-title {
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.close-body {
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--ink-2);
+  max-width: 46ch;
+  margin: 16px auto 28px;
 }
 
 /* toast */

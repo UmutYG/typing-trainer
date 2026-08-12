@@ -8,12 +8,17 @@ import {
   dominantClass,
   eliteTarget,
   errorPatterns,
+  flowStanding,
   gaps,
   ikiForWpm,
   instruct,
+  isTiring,
+  marksFor,
   nextStandard,
   phaseAt,
+  selectFocus,
   summarizeSet,
+  unlockLevel,
   wpmForIki,
 } from "../src/core/coach";
 
@@ -142,6 +147,150 @@ describe("what to work on", () => {
     const standing = classStanding(m, 150);
     expect(standing[0].cls).toBe("alternating"); // th is 200 vs a 68ms target
     expect(standing[0].mean).toBeCloseTo(200, 4);
+  });
+});
+
+describe("keeping the work varied", () => {
+  // a model where space pairs are both the commonest and among the slowest,
+  // which is the situation that used to let them own every set
+  function spaceHeavy() {
+    const m = new SkillModel();
+    const slow: Record<string, number> = {
+      " t": 150, "e ": 150, " a": 150, "s ": 150, " o": 150, "t ": 150,
+      ed: 220, un: 215, ce: 210, // same-finger, rarer but further from target
+      th: 140, he: 138,
+    };
+    for (const [bg, iki] of Object.entries(slow)) {
+      for (let i = 0; i < 20; i++) m.recordSample(bg, iki, true);
+    }
+    return m;
+  }
+  const freq = new Map<string, number>([
+    [" t", 0.036], ["e ", 0.044], [" a", 0.022], ["s ", 0.022], [" o", 0.018], ["t ", 0.017],
+    ["ed", 0.004], ["un", 0.003], ["ce", 0.003], ["th", 0.031], ["he", 0.026],
+  ]);
+
+  it("does not let one kind of movement fill the whole set", () => {
+    const ranked = gaps(spaceHeavy(), freq, 150);
+    const focus = selectFocus(ranked);
+    const counts = new Map<string, number>();
+    for (const bg of focus.targets) {
+      const cls = ranked.find((g) => g.bigram === bg)!.cls;
+      counts.set(cls, (counts.get(cls) ?? 0) + 1);
+    }
+    for (const n of counts.values()) expect(n).toBeLessThanOrEqual(2);
+    expect(counts.size).toBeGreaterThan(1); // more than one thing to work on
+  });
+
+  it("changes subject when asked to avoid the last set's movement", () => {
+    const ranked = gaps(spaceHeavy(), freq, 150);
+    const first = selectFocus(ranked);
+    const second = selectFocus(ranked, { avoidClass: first.cls });
+    expect(second.cls).not.toBe(first.cls);
+  });
+
+  it("stays on the worst movement if nothing else is close", () => {
+    const m = new SkillModel();
+    for (let i = 0; i < 20; i++) {
+      m.recordSample("ed", 400, false); // ruinous
+      m.recordSample("th", 66, true); // already at target
+    }
+    const ranked = gaps(m, new Map([["ed", 0.3], ["th", 0.3]]), 150);
+    expect(selectFocus(ranked, { avoidClass: "same-finger" }).cls).toBe("same-finger");
+  });
+
+  it("prefers a steady pair over an erratic one of equal speed", () => {
+    const steady = new SkillModel();
+    const erratic = new SkillModel();
+    for (let i = 0; i < 30; i++) {
+      steady.recordSample("th", 150, true);
+      erratic.recordSample("th", i % 2 === 0 ? 80 : 220, true);
+    }
+    const f = new Map([["th", 0.3]]);
+    expect(gaps(erratic, f, 150)[0].cost).toBeGreaterThan(gaps(steady, f, 150)[0].cost);
+  });
+
+  it("gives nothing to work on when everything already meets the standard", () => {
+    const m = new SkillModel();
+    for (let i = 0; i < 20; i++) m.recordSample("th", 50, true);
+    expect(selectFocus(gaps(m, new Map([["th", 0.3]]), 150)).targets).toHaveLength(0);
+  });
+});
+
+describe("overlap and evenness", () => {
+  it("reads overlap straight from the keystrokes", () => {
+    const m = new SkillModel();
+    for (let i = 0; i < 10; i++) m.recordSample("th", 120, i < 6); // 6 of 10 overlapped
+    expect(flowStanding(m).rollover).toBeCloseTo(0.6, 5);
+  });
+
+  it("scores a metronomic hand above a lurching one", () => {
+    const even = new SkillModel();
+    const lurchy = new SkillModel();
+    for (let i = 0; i < 30; i++) {
+      even.recordSample("th", 120, true);
+      lurchy.recordSample("th", i % 2 === 0 ? 60 : 200, true);
+    }
+    expect(flowStanding(even).rhythm).toBeGreaterThan(flowStanding(lurchy).rhythm);
+    expect(flowStanding(even).rhythm).toBeGreaterThan(0.9);
+  });
+});
+
+describe("meeting punctuation a stage at a time", () => {
+  it("starts you on sentences, not on bare letters", () => {
+    expect(unlockLevel(new SkillModel(), 150)).toBe(1);
+    expect(marksFor(1)).toEqual([".", ","]);
+  });
+
+  it("holds the next stage back until the current marks settle", () => {
+    const m = new SkillModel();
+    // full stops are being typed, but slowly
+    for (let i = 0; i < 40; i++) m.recordSample("e.", 400, false);
+    expect(unlockLevel(m, 150)).toBe(1);
+  });
+
+  it("opens the next stage once they land near the target", () => {
+    const m = new SkillModel();
+    for (let i = 0; i < 40; i++) {
+      m.recordSample("e.", 70, true);
+      m.recordSample("t,", 70, true);
+    }
+    expect(unlockLevel(m, 150)).toBeGreaterThan(1);
+  });
+
+  it("hands the generator every mark unlocked so far", () => {
+    expect(marksFor(3)).toContain("'");
+    expect(marksFor(3)).toContain("?");
+    expect(marksFor(3)).not.toContain(";");
+  });
+});
+
+describe("knowing when to ease off", () => {
+  const steady = Array.from({ length: 14 }, () => ({ wpm: 120, accuracy: 0.98 }));
+
+  it("says nothing while you are holding your level", () => {
+    expect(isTiring(steady)).toBe(false);
+  });
+
+  it("notices when speed and accuracy slide together", () => {
+    const sliding = [
+      ...Array.from({ length: 6 }, () => ({ wpm: 130, accuracy: 0.99 })),
+      ...Array.from({ length: 6 }, () => ({ wpm: 112, accuracy: 0.95 })),
+    ];
+    expect(isTiring(sliding)).toBe(true);
+  });
+
+  it("does not call slowing down alone fatigue", () => {
+    // easing off on purpose, still clean: that is precision work, not tiring
+    const careful = [
+      ...Array.from({ length: 6 }, () => ({ wpm: 130, accuracy: 0.97 })),
+      ...Array.from({ length: 6 }, () => ({ wpm: 110, accuracy: 0.995 })),
+    ];
+    expect(isTiring(careful)).toBe(false);
+  });
+
+  it("waits for enough evidence before judging", () => {
+    expect(isTiring([{ wpm: 200, accuracy: 1 }, { wpm: 50, accuracy: 0.5 }])).toBe(false);
   });
 });
 
@@ -306,27 +455,33 @@ describe("the coach's instruction", () => {
     ]),
     150,
   );
+  const focus = selectFocus(ranked);
+  const calmFlow = { rollover: 0.5, rhythm: 0.8, samples: 500 };
+  const say = (i: number, over: Partial<Parameters<typeof instruct>[0]> = {}) =>
+    instruct({ phaseState: phaseAt(i), focus, flow: calmFlow, marks: [".", ","], ...over });
 
   it("leaves warm up and stretch untargeted", () => {
-    for (const phase of [phaseAt(0), phaseAt(11)]) {
-      const ins = instruct(phase, ranked, "same-finger");
+    for (const i of [0, 11]) {
+      const ins = say(i);
       expect(ins.targets).toHaveLength(0);
       expect(ins.density).toBe(0);
     }
   });
 
-  it("makes stretch lines short", () => {
-    expect(instruct(phaseAt(11), ranked, null).lineLength).toBeLessThan(
-      instruct(phaseAt(3), ranked, null).lineLength,
-    );
+  it("makes stretch passages shorter than focus ones", () => {
+    expect(say(11).lineLength).toBeLessThan(say(3).lineLength);
   });
 
   it("targets the costly pairs during focus and names the movement in plain words", () => {
-    const ins = instruct(phaseAt(3), ranked, "same-finger");
+    const ins = instruct({
+      phaseState: phaseAt(3),
+      focus: { targets: focus.targets, cls: "same-finger" },
+      flow: calmFlow,
+      marks: [],
+    });
     expect(ins.targets.length).toBeGreaterThan(0);
     expect(ins.density).toBeGreaterThan(0);
     expect(ins.say).toContain("one finger has to fire twice");
-    expect(ins.say).toContain("th"); // the pairs it is chasing
   });
 
   it("phrases every movement class so the line stays grammatical", () => {
@@ -340,34 +495,64 @@ describe("the coach's instruction", () => {
       "same-finger",
     ] as const;
     for (const cls of classes) {
-      const say = instruct(phaseAt(3), ranked, cls).say;
-      // opens with a capital, names pairs after a dash, ends cleanly
-      expect(say).toMatch(/^[A-Z]\S*.* — chasing .+\.$/);
-      expect(say).not.toMatch(/\s{2,}/);
+      const line = instruct({
+        phaseState: phaseAt(3),
+        focus: { targets: focus.targets, cls },
+        flow: calmFlow,
+        marks: [],
+      }).say;
+      expect(line).toMatch(/^[A-Z]\S*.* — chasing .+\.$/);
+      expect(line).not.toMatch(/\s{2,}/);
     }
   });
 
   it("asks for clean keys, not speed, during precision", () => {
-    const ins = instruct(phaseAt(15), ranked, "same-finger");
+    const ins = say(15);
     expect(ins.targets.length).toBeGreaterThan(0);
     expect(ins.say.toLowerCase()).toContain("clean");
     expect(ins.say.toLowerCase()).not.toContain("faster");
   });
 
+  it("calls out overlap during stretch when it is the thing holding you back", () => {
+    const flat = instruct({
+      phaseState: phaseAt(11),
+      focus,
+      flow: { rollover: 0.12, rhythm: 0.7, samples: 900 },
+      marks: [],
+    });
+    expect(flat.say.toLowerCase()).toContain("overlap");
+    // and stays quiet about it once overlap is healthy
+    expect(say(11).say.toLowerCase()).not.toContain("overlap");
+  });
+
+  it("eases off instead of pushing when you are tiring", () => {
+    const ins = say(3, { tiring: true });
+    expect(ins.say.toLowerCase()).toContain("ease off");
+  });
+
+  it("announces a new punctuation stage once, on its own", () => {
+    const ins = say(3, { announce: "Adding apostrophes." });
+    expect(ins.say).toBe("Adding apostrophes.");
+    expect(ins.targets).toHaveLength(0);
+  });
+
+  it("passes the unlocked marks through to the generator", () => {
+    expect(say(3).marks).toEqual([".", ","]);
+    expect(say(3).capitals).toBe(true);
+  });
+
   it("keeps every instruction short enough to read at a glance", () => {
-    // he asked for no long explanations: one short line, always
     for (const i of [0, 3, 11, 15]) {
-      const say = instruct(phaseAt(i), ranked, "same-finger").say;
-      expect(say.length).toBeLessThanOrEqual(80);
-      expect(say.split(". ").length).toBeLessThanOrEqual(2);
+      expect(say(i).say.length).toBeLessThanOrEqual(80);
+      expect(say(i).say.split(". ").length).toBeLessThanOrEqual(2);
     }
   });
 
   it("never mentions a score, a goal or a test", () => {
     for (const i of [0, 3, 11, 15]) {
-      const say = instruct(phaseAt(i), ranked, "same-finger").say.toLowerCase();
+      const line = say(i).say.toLowerCase();
       for (const word of ["goal", "test", "score", "record", "beat"]) {
-        expect(say).not.toContain(word);
+        expect(line).not.toContain(word);
       }
     }
   });

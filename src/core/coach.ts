@@ -39,8 +39,10 @@ export const TIERS = [100, 120, 140, 160, 180, 200];
  * finger must travel and reset before it can fire again).
  */
 export const CLASS_FACTOR: Record<TransitionClass, number> = {
+  // the thumb travels almost nowhere, the key is enormous, and it is nearly
+  // always overlapping with the other hand — this is the fastest thing you do
+  space: 0.75,
   alternating: 0.85,
-  space: 0.9,
   "same-hand-roll": 0.95,
   repeat: 1.05,
   "same-hand-stretch": 1.25,
@@ -107,8 +109,16 @@ export interface Gap {
 }
 
 /**
- * Every measured transition, ranked by how much time it costs against the
- * standard: how far off it is, weighted by how often English asks for it.
+ * Every measured transition, ranked by what it costs against the standard.
+ *
+ * Frequency is deliberately damped by a square root. Raw frequency is brutally
+ * top-heavy — 38% of English transitions touch the space bar, and 21 of the 40
+ * commonest pairs involve it — so weighting by it directly lets a handful of
+ * pairs own the coach forever. The square root keeps common pairs ahead of rare
+ * ones without letting them monopolise.
+ *
+ * An unsteady pair is also lifted: erratic timing means the movement is still
+ * being decided rather than executed, and that is exactly what practice fixes.
  */
 export function gaps(
   model: SkillModel,
@@ -117,14 +127,23 @@ export function gaps(
   minCount = MIN_SAMPLES,
 ): Gap[] {
   const out: Gap[] = [];
-  for (const [bigram, freq] of engFreq) {
-    const s = model.bigrams.get(bigram);
-    if (!s || s.count < minCount) continue;
+  // anything typed but absent from the word list (punctuation, capitals,
+  // invented words) is weighted by how often it actually comes up for you
+  let totalAttempts = 0;
+  for (const s of model.bigrams.values()) totalAttempts += s.attempts;
+
+  for (const [bigram, s] of model.bigrams) {
+    if (s.count < minCount) continue;
     const cls = classifyTransition(bigram[0], bigram[1]);
     if (!cls) continue;
+    const freq =
+      engFreq.get(bigram) ?? (totalAttempts > 0 ? s.attempts / totalAttempts : 0);
+    if (freq <= 0) continue;
     const target = eliteTarget(cls, tierWpm);
     const gap = Math.max(0, s.mean - target);
     const errorRate = model.errorRate(bigram);
+    const sd = Math.sqrt(Math.max(0, s.m2));
+    const cv = s.mean > 0 ? Math.min(1, sd / s.mean) : 0;
     out.push({
       bigram,
       cls,
@@ -132,14 +151,72 @@ export function gaps(
       target,
       gap,
       freq,
-      // errors cost real time to fix, so they lift a pair's priority
-      cost: freq * gap * (1 + 3 * errorRate),
+      cost: Math.sqrt(freq) * gap * (1 + 3 * errorRate) * (1 + cv),
       count: s.count,
       errorRate,
     });
   }
   out.sort((a, b) => b.cost - a.cost);
   return out;
+}
+
+/** How many pairs of one movement type may fill a single set. */
+const MAX_PER_CLASS = 2;
+
+export interface Focus {
+  targets: string[];
+  cls: TransitionClass | null;
+}
+
+/**
+ * Picks what a set is built from. Two rules keep practice from going stale:
+ * no more than a couple of pairs from the same kind of movement, and a
+ * deliberate change of subject from the set before — there is always more than
+ * one thing worth fixing, and rotating between them is what keeps the work
+ * feeling alive.
+ */
+export function selectFocus(
+  ranked: Gap[],
+  opts: { avoidClass?: TransitionClass | null; size?: number } = {},
+): Focus {
+  const size = opts.size ?? 6;
+  const withGap = ranked.filter((g) => g.gap > 0);
+  if (withGap.length === 0) return { targets: [], cls: null };
+
+  // compare the average cost of a pair in each class, not the total: a class
+  // simply having more pairs measured should not make it look worse
+  const byClass = new Map<TransitionClass, { sum: number; n: number }>();
+  for (const g of withGap.slice(0, 40)) {
+    const a = byClass.get(g.cls) ?? { sum: 0, n: 0 };
+    a.sum += g.cost;
+    a.n++;
+    byClass.set(g.cls, a);
+  }
+  const ordered = [...byClass.entries()]
+    .map(([cls, a]) => [cls, a.sum / a.n] as [TransitionClass, number])
+    .sort((a, b) => b[1] - a[1]);
+  let lead = ordered[0]?.[0] ?? null;
+  // move on to the next-worst movement if it is nearly as costly
+  if (opts.avoidClass && lead === opts.avoidClass && ordered.length > 1) {
+    const [, bestCost] = ordered[0];
+    const [nextCls, nextCost] = ordered[1];
+    if (nextCost >= bestCost * 0.5) lead = nextCls;
+  }
+
+  const targets: string[] = [];
+  const used = new Map<TransitionClass, number>();
+  // the leading movement goes in first, then the field fills the rest
+  for (const pass of [true, false]) {
+    for (const g of withGap) {
+      if (targets.length >= size) break;
+      if (pass !== (g.cls === lead)) continue;
+      const n = used.get(g.cls) ?? 0;
+      if (n >= MAX_PER_CLASS) continue;
+      used.set(g.cls, n + 1);
+      targets.push(g.bigram);
+    }
+  }
+  return { targets, cls: lead };
 }
 
 /** Which kind of movement is costing the most overall. */
@@ -200,6 +277,107 @@ export function classStanding(
       samples: a.w,
     }))
     .sort((x, y) => y.mean / y.target - x.mean / x.target);
+}
+
+/* ------------------------------------------------------------------ *
+ * Flow: overlap and evenness
+ * ------------------------------------------------------------------ */
+
+export interface Flow {
+  /** share of keystrokes begun before the previous key was released */
+  rollover: number;
+  /** 1 = metronomic, 0 = wildly uneven */
+  rhythm: number;
+  samples: number;
+}
+
+/**
+ * The two habits that separate a fast typist from an elite one, and the two the
+ * app can see but you cannot feel reliably.
+ *
+ * Rollover is overlap — pressing the next key before letting the last one go.
+ * The largest study of typing found the quickest typists overlap on roughly
+ * 40–70% of keystrokes; slow typists finish each key before starting the next.
+ *
+ * Rhythm is evenness. Two typists can average the same speed while one moves
+ * in smooth chunks and the other in lurches, and only the smooth one is close
+ * to the next tier — evenness means the movement has stopped being a decision.
+ */
+export function flowStanding(model: SkillModel): Flow {
+  let roll = 0;
+  let n = 0;
+  let weighted = 0;
+  let weight = 0;
+  for (const s of model.bigrams.values()) {
+    if (s.count === 0) continue;
+    roll += s.rollover;
+    n += s.count;
+    if (s.count >= 4 && s.mean > 0) {
+      const cv = Math.min(1, Math.sqrt(Math.max(0, s.m2)) / s.mean);
+      weighted += (1 - cv) * s.count;
+      weight += s.count;
+    }
+  }
+  return {
+    rollover: n > 0 ? roll / n : 0,
+    rhythm: weight > 0 ? weighted / weight : 0,
+    samples: n,
+  };
+}
+
+/** Below this, overlap is worth calling out as the thing holding you back. */
+export const ROLLOVER_TARGET = 0.4;
+
+/* ------------------------------------------------------------------ *
+ * What you are allowed to meet, and when
+ * ------------------------------------------------------------------ */
+
+/**
+ * Punctuation and capitals arrive in stages rather than all at once, so each
+ * new movement gets a stretch of practice on its own. You start with sentences
+ * — an experienced typist does not need to be walked through the alphabet.
+ */
+export const UNLOCKS: { level: number; marks: string[]; announce: string }[] = [
+  { level: 0, marks: [], announce: "" },
+  { level: 1, marks: [".", ","], announce: "Sentences now — capitals, full stops, commas." },
+  { level: 2, marks: ["'"], announce: "Adding apostrophes." },
+  { level: 3, marks: ["?", "!"], announce: "Adding question and exclamation marks." },
+  { level: 4, marks: [";", ":", '"'], announce: "Adding semicolons, colons and quotes." },
+  { level: 5, marks: ["-"], announce: "Adding hyphens — that is the full set." },
+];
+
+const MIN_MARK_SAMPLES = 25;
+const READY_RATIO = 1.4; // within 40% of the elite target counts as settled
+
+/**
+ * How far through the punctuation ladder you are. A stage opens only once the
+ * marks already in play are landing near their target — new symbols wait until
+ * the last ones stopped being work.
+ */
+export function unlockLevel(model: SkillModel, tierWpm: number): number {
+  let level = 1; // capitals and sentence punctuation from the start
+  for (let i = 1; i < UNLOCKS.length - 1; i++) {
+    const marks = new Set(UNLOCKS[i].marks);
+    let samples = 0;
+    let weighted = 0;
+    for (const [bigram, s] of model.bigrams) {
+      if (!marks.has(bigram[0]) && !marks.has(bigram[1])) continue;
+      if (s.count === 0) continue;
+      const cls = classifyTransition(bigram[0], bigram[1]);
+      if (!cls) continue;
+      samples += s.count;
+      weighted += (s.mean / eliteTarget(cls, tierWpm)) * s.count;
+    }
+    if (samples < MIN_MARK_SAMPLES) break;
+    if (weighted / samples > READY_RATIO) break;
+    level = i + 1;
+  }
+  return level;
+}
+
+/** Every mark available at a given stage. */
+export function marksFor(level: number): string[] {
+  return UNLOCKS.filter((u) => u.level > 0 && u.level <= level).flatMap((u) => u.marks);
 }
 
 /* ------------------------------------------------------------------ *
@@ -361,10 +539,13 @@ export interface Instruction {
   say: string;
   /** pairs this line is built around (empty for untargeted phases) */
   targets: string[];
-  /** shorter lines for stretch work */
+  /** shorter passages for stretch work */
   lineLength: number;
-  /** how much of the line should carry the targets */
+  /** how much of the passage should carry the targets */
   density: number;
+  /** punctuation currently in play */
+  marks: string[];
+  capitals: boolean;
 }
 
 const PHASE_TITLE: Record<Phase, string> = {
@@ -385,59 +566,97 @@ const COACH_PHRASE: Record<TransitionClass, string> = {
   "same-finger": "the pairs where one finger has to fire twice",
 };
 
+export interface InstructInput {
+  phaseState: PhaseState;
+  focus: Focus;
+  flow: Flow;
+  /** punctuation stage in play */
+  marks: string[];
+  /** set once, the first time a new stage opens */
+  announce?: string | null;
+  /** the coach has noticed you are tiring */
+  tiring?: boolean;
+}
+
 /**
  * What to do, right now. The only thing the app asks you to hold in your head.
  */
-export function instruct(
-  phaseState: PhaseState,
-  ranked: Gap[],
-  focusClass: TransitionClass | null,
-): Instruction {
+export function instruct(input: InstructInput): Instruction {
+  const { phaseState, focus, flow, marks, announce, tiring } = input;
   const { phase } = phaseState;
   const title = PHASE_TITLE[phase];
+  const common = { phase, title, marks, capitals: true };
+
+  if (announce) {
+    return { ...common, say: announce, targets: [], lineLength: 150, density: 0 };
+  }
 
   if (phase === "warmup") {
     return {
-      phase,
-      title,
-      say: "Settle in. Nothing targeted yet.",
+      ...common,
+      say: tiring
+        ? "Easy does it. Let the hands wake up again."
+        : "Settle in. Nothing targeted yet.",
       targets: [],
-      lineLength: 52,
+      lineLength: 150,
       density: 0,
     };
   }
 
   if (phase === "stretch") {
-    return {
-      phase,
-      title,
-      say: "Short bursts, faster than feels safe. Messy is fine.",
-      targets: [],
-      lineLength: 30,
-      density: 0,
-    };
+    // overlap is the single habit that separates the tiers; if it is missing,
+    // this is the set to say so
+    const say =
+      flow.samples > 200 && flow.rollover < ROLLOVER_TARGET
+        ? "Let the keys overlap — start the next before the last comes up."
+        : "Short bursts, faster than feels safe. Messy is fine.";
+    return { ...common, say, targets: [], lineLength: 64, density: 0 };
   }
-
-  const top = ranked.slice(0, 6).map((g) => g.bigram);
 
   if (phase === "precision") {
     return {
-      phase,
-      title,
+      ...common,
       say: "Every key clean. Mistakes have to be fixed before the line moves on.",
-      targets: top,
-      lineLength: 52,
+      targets: focus.targets,
+      lineLength: 130,
       density: 0.4,
     };
   }
 
-  const phrase = focusClass ? COACH_PHRASE[focusClass] : null;
-  const pairs = ranked.slice(0, 3).map((g) => show(g.bigram));
-  const say = phrase
-    ? `${capitalize(phrase)} — chasing ${pairs.join(", ")}.`
-    : "Keeping the whole keyboard moving.";
+  const phrase = focus.cls ? COACH_PHRASE[focus.cls] : null;
+  const pairs = focus.targets.slice(0, 3).map(show);
+  const say = tiring
+    ? "You are drifting — ease off and let the rhythm come back."
+    : phrase && pairs.length > 0
+      ? `${capitalize(phrase)} — chasing ${pairs.join(", ")}.`
+      : "Keeping the whole keyboard moving.";
 
-  return { phase, title, say, targets: top, lineLength: 56, density: 0.5 };
+  return { ...common, say, targets: focus.targets, lineLength: 150, density: 0.5 };
 }
 
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/* ------------------------------------------------------------------ *
+ * Knowing when to stop
+ * ------------------------------------------------------------------ */
+
+/** A gap this long means you got up and came back: warm up again. */
+export const NEW_SITTING_MS = 20 * 60 * 1000;
+
+/** Around here a session has done its work; the coach offers you the door. */
+export const SESSION_CLOSE_MS = 20 * 60 * 1000;
+
+/**
+ * Whether the recent lines are sliding — slower and messier than the ones
+ * before them. Practising through this teaches the mistakes, so the coach eases
+ * off rather than pushing on.
+ */
+export function isTiring(recent: { wpm: number; accuracy: number }[]): boolean {
+  if (recent.length < 12) return false;
+  const tail = recent.slice(-6);
+  const before = recent.slice(-12, -6);
+  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  const wpmDrop = mean(before.map((r) => r.wpm)) - mean(tail.map((r) => r.wpm));
+  const accDrop = mean(before.map((r) => r.accuracy)) - mean(tail.map((r) => r.accuracy));
+  return wpmDrop > mean(before.map((r) => r.wpm)) * 0.08 && accDrop > 0.01;
+}

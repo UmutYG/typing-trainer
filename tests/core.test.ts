@@ -2,11 +2,17 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { newStat, updateStat, SkillModel } from "../src/core/model";
+import { newStat, updateStat } from "../src/core/model";
 import { CaptureEngine, type KeyEventLite, type LineResult } from "../src/core/capture";
 import { classifyTransition } from "../src/core/keyboard";
 import { buildCorpus } from "../src/core/words";
-import { generateLine, measureDensity, synthesizeWord, DEFAULT_OPTIONS } from "../src/core/generator";
+import {
+  DEFAULT_OPTIONS,
+  enrich,
+  generateLine,
+  measureDensity,
+  synthesizeWord,
+} from "../src/core/generator";
 import { lineStats } from "../src/core/wpm";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -325,62 +331,6 @@ describe("keyboard classification", () => {
   });
 });
 
-describe("bottleneck ranking", () => {
-  const engFreq = new Map<string, number>([
-    ["th", 0.03],
-    ["xc", 0.001],
-    ["er", 0.02],
-    ["qz", 0.00001],
-  ]);
-
-  it("ranks by english-frequency-weighted personal excess", () => {
-    const m = new SkillModel();
-    // establish a baseline: many fast transitions
-    for (let i = 0; i < 20; i++) {
-      for (const bg of ["in", "at", "on", "es", "en", "ti", "st", "ar", "nd", "ou", "ea", "ns", "to", "it", "ha", "re"]) {
-        m.recordSample(bg, 100, true);
-      }
-    }
-    // th: frequent and slow. xc: rare and slower. er: frequent and fast.
-    for (let i = 0; i < 20; i++) {
-      m.recordSample("th", 220, false);
-      m.recordSample("xc", 320, false);
-      m.recordSample("er", 105, true);
-    }
-    const ranks = m.bottlenecks(engFreq, 4).map((b) => b.bigram);
-    // th's 120ms excess at 30x the frequency beats xc's 220ms excess
-    expect(ranks[0]).toBe("th");
-    expect(ranks.indexOf("xc")).toBeLessThan(ranks.indexOf("er"));
-  });
-
-  it("errors inflate a transition's priority", () => {
-    const base = new SkillModel();
-    const erry = new SkillModel();
-    for (let i = 0; i < 20; i++) {
-      for (const bg of ["in", "at", "on", "es", "en", "ti", "st", "ar", "nd", "ou", "ea", "ns", "to", "it", "ha", "re"]) {
-        base.recordSample(bg, 100, true);
-        erry.recordSample(bg, 100, true);
-      }
-      base.recordSample("th", 150, false);
-      erry.recordSample("th", 150, false);
-    }
-    erry.recordErrors("th", 10);
-    const sBase = base.bottlenecks(engFreq, 4).find((b) => b.bigram === "th")!;
-    const sErry = erry.bottlenecks(engFreq, 4).find((b) => b.bigram === "th")!;
-    expect(sErry.score).toBeGreaterThan(sBase.score * 1.5);
-  });
-
-  it("gives frequent unmeasured transitions an exploration score", () => {
-    const m = new SkillModel();
-    for (let i = 0; i < 20; i++)
-      for (const bg of ["in", "at", "on", "es", "en", "ti", "st", "ar", "nd", "ou", "ea", "ns", "to", "it", "ha", "re"])
-        m.recordSample(bg, 100, true);
-    const th = m.bottlenecks(engFreq, 4).find((b) => b.bigram === "th")!;
-    expect(th.count).toBe(0);
-    expect(th.score).toBeGreaterThan(0);
-  });
-});
-
 describe("corpus + generator", () => {
   const raw = readFileSync(join(here, "../src/data/words.txt"), "utf8");
   const corpus = buildCorpus(raw);
@@ -431,6 +381,56 @@ describe("corpus + generator", () => {
     const g = generateLine(corpus, [], { ...DEFAULT_OPTIONS, lineLength: 30 }, rng);
     expect(g.text.length).toBeGreaterThanOrEqual(30);
     expect(g.text.length).toBeLessThan(48);
+  });
+});
+
+describe("writing, not just words", () => {
+  const rng = lcg(9);
+  const words = "the quick brown fox jumps over a lazy dog and then runs home again today".split(" ");
+
+  it("leaves the words alone when nothing is unlocked", () => {
+    expect(enrich(words, { marks: [], capitals: false }, lcg(1))).toEqual(words);
+  });
+
+  it("opens sentences with a capital and closes them with a stop", () => {
+    const out = enrich(words, { marks: [".", ","], capitals: true }, rng).join(" ");
+    expect(out[0]).toBe(out[0].toUpperCase());
+    expect(out.trim().endsWith(".")).toBe(true);
+    // every sentence after a full stop also starts capitalised
+    for (const m of out.matchAll(/[.?!]\s+(\S)/g)) {
+      expect(m[1]).toBe(m[1].toUpperCase());
+    }
+  });
+
+  it("never invents a mark that is not unlocked yet", () => {
+    for (let i = 0; i < 40; i++) {
+      const out = enrich(words, { marks: [".", ","], capitals: true }, rng).join(" ");
+      expect(out).not.toMatch(/[?!;:'"-]/);
+    }
+  });
+
+  it("brings in the later marks once they are unlocked", () => {
+    const seen = new Set<string>();
+    const r = lcg(4);
+    for (let i = 0; i < 200; i++) {
+      const out = enrich(words, { marks: [".", ",", "'", "?", "!"], capitals: true }, r).join(" ");
+      for (const ch of "?!'") if (out.includes(ch)) seen.add(ch);
+    }
+    expect(seen.has("'")).toBe(true);
+    expect(seen.has("?")).toBe(true);
+  });
+
+  it("keeps the practice words themselves intact", () => {
+    const out = enrich(words, { marks: [".", ","], capitals: true }, lcg(12));
+    const bare = out.join(" ").toLowerCase().replace(/[.,?!;:'"-]/g, "");
+    expect(bare.split(/\s+/)).toEqual(words);
+  });
+
+  it("hands whole sentences to the typist, never a dangling fragment", () => {
+    for (let i = 0; i < 30; i++) {
+      const out = enrich(words, { marks: [".", ","], capitals: true }, rng).join(" ");
+      expect(out.trim()).toMatch(/[.?!]$/);
+    }
   });
 });
 

@@ -6,17 +6,25 @@ import { generateLine, DEFAULT_OPTIONS } from "./core/generator";
 import type { CharResult, LineResult } from "./core/capture";
 import { lineStats, type LineStats } from "./core/wpm";
 import {
+  NEW_SITTING_MS,
+  SESSION_CLOSE_MS,
+  UNLOCKS,
   currentLevel,
-  dominantClass,
+  flowStanding,
   gaps,
   instruct,
+  isTiring,
+  marksFor,
   nextStandard,
   phaseAt,
+  selectFocus,
   summarizeSet,
+  unlockLevel,
   type Instruction,
   type PhaseState,
   type SetSummary,
 } from "./core/coach";
+import type { TransitionClass } from "./core/keyboard";
 import * as persist from "./core/persist";
 import { DrillScreen } from "./ui/DrillScreen";
 import { Standing } from "./ui/Standing";
@@ -49,6 +57,17 @@ export default function App() {
   });
   /** last average wpm seen for each phase, for "up from" comparisons */
   const prevPhaseWpm = useRef<Record<string, number>>({});
+  /** what the previous set was about, so the next one changes subject */
+  const lastFocusClass = useRef<TransitionClass | null>(null);
+  const focusClassRef = useRef<TransitionClass | null>(null);
+  /** highest punctuation stage already announced, so it is said once */
+  const announcedLevel = useRef(1);
+  const tiring = useRef(false);
+  /** this sitting's lines, for noticing a slide */
+  const sittingLines = useRef<{ wpm: number; accuracy: number }[]>([]);
+  /** when this sitting began, for the session close */
+  const sittingStart = useRef<number | null>(null);
+  const [closing, setClosing] = useState(false);
 
   // console/automation access to the full dataset
   useEffect(() => {
@@ -81,6 +100,11 @@ export default function App() {
         }
         setSessions(savedSessions);
         setDays(savedDays);
+        // coming back after a break is a fresh sitting: warm up again
+        const last = savedSessions.length > 0 ? savedSessions[savedSessions.length - 1].time : 0;
+        if (Date.now() - last < NEW_SITTING_MS) {
+          sittingStart.current = Date.now();
+        }
         setReady(true);
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
@@ -97,7 +121,26 @@ export default function App() {
     const level = currentLevel(modelRef.current, corpus.engFreq);
     const tier = nextStandard(level?.wpm ?? null);
     const ranked = gaps(modelRef.current, corpus.engFreq, tier);
-    const ins: Instruction = instruct(ps, ranked, dominantClass(ranked));
+    // rotate away from whatever the last set was about
+    const focus = selectFocus(ranked, { avoidClass: lastFocusClass.current });
+    focusClassRef.current = focus.cls;
+    const flow = flowStanding(modelRef.current);
+    const level2 = unlockLevel(modelRef.current, tier);
+
+    let announce: string | null = null;
+    if (level2 > announcedLevel.current) {
+      announce = UNLOCKS[level2]?.announce ?? null;
+      announcedLevel.current = level2;
+    }
+
+    const ins: Instruction = instruct({
+      phaseState: ps,
+      focus,
+      flow,
+      marks: marksFor(level2),
+      announce,
+      tiring: tiring.current,
+    });
     return { phaseState: ps, instruction: ins };
     // modelVersion keeps the coach's picture current as you type
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -112,7 +155,7 @@ export default function App() {
     return m;
   }, []);
 
-  // build the next line whenever the coach's instruction changes
+  // build the next passage whenever the coach's instruction changes
   useEffect(() => {
     if (!ready) return;
     activeTargets.current = instruction.targets;
@@ -121,6 +164,8 @@ export default function App() {
         ...DEFAULT_OPTIONS,
         lineLength: instruction.lineLength,
         targetDensity: instruction.density,
+        marks: instruction.marks,
+        capitals: instruction.capitals,
       }).text,
     );
   }, [ready, instruction, corpus]);
@@ -145,6 +190,7 @@ export default function App() {
       setSummary(s);
       prevPhaseWpm.current[t.phase] = t.wpms.reduce((a, b) => a + b, 0) / t.wpms.length;
     }
+    if (phaseState.phase === "focus") lastFocusClass.current = focusClassRef.current;
     setTracker.current = {
       phase: phaseState.phase,
       number: t.wpms.length > 0 ? t.number + 1 : t.number,
@@ -178,6 +224,7 @@ export default function App() {
       setLastStats(stats);
       setTracker.current.wpms.push(stats.wpm);
       setSummary(null); // the moment you type again, the last set is behind you
+      if (sittingStart.current === null) sittingStart.current = Date.now();
       const rec: persist.SessionRecord = {
         time: Date.now(),
         ms: Math.max(0, result.endTime - result.startTime),
@@ -190,6 +237,16 @@ export default function App() {
         targets: activeTargets.current,
         mode: instruction.phase,
       };
+      const sittingRows = [...sittingLines.current, { wpm: stats.wpm, accuracy: stats.accuracy }];
+      sittingLines.current = sittingRows.slice(-30);
+      tiring.current = isTiring(sittingLines.current);
+
+      // a session that has done its work says so, at the end of a set
+      const elapsed = Date.now() - (sittingStart.current ?? Date.now());
+      if (elapsed > SESSION_CLOSE_MS && phaseAt(lineIndex + 1).indexInPhase === 0) {
+        setClosing(true);
+      }
+
       setSessions((prev) => [...prev, rec]);
       void persist.addSession(rec).then(() =>
         // fold old per-line rows into daily totals once they pile up
@@ -257,6 +314,26 @@ export default function App() {
         </div>
       ) : !ready || line === null ? (
         <div className="hint">loading…</div>
+      ) : tab === "practice" && closing ? (
+        <div className="close-card">
+          <div className="close-title">That is a session.</div>
+          <div className="close-body">
+            {minutesToday} minutes today, {sittingLines.current.length} passages. Stop here and it
+            will have done its work — the hands keep learning after you walk away.
+          </div>
+          <div className="btn-row">
+            <button
+              className="btn primary"
+              onClick={() => {
+                setClosing(false);
+                sittingStart.current = Date.now();
+                sittingLines.current = [];
+              }}
+            >
+              Keep going
+            </button>
+          </div>
+        </div>
       ) : tab === "practice" ? (
         <>
           <CoachBar

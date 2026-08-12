@@ -4,12 +4,17 @@ import type { DayRecord, SessionRecord } from "../core/persist";
 import type { Corpus } from "../core/words";
 import { CLASS_LABELS } from "../core/keyboard";
 import {
+  ROLLOVER_TARGET,
   classStanding,
   currentLevel,
   errorPatterns,
+  flowStanding,
   gaps,
   keyGaps,
+  marksFor,
   nextStandard,
+  selectFocus,
+  unlockLevel,
   wpmForIki,
 } from "../core/coach";
 import { TrendChart } from "./TrendChart";
@@ -41,10 +46,26 @@ export function Standing({ model, sessions, days, corpus, onExport, onReset }: P
   const level = useMemo(() => currentLevel(model, corpus.engFreq), [model, corpus]);
   const tier = nextStandard(level?.wpm ?? null);
   const ranked = useMemo(() => gaps(model, corpus.engFreq, tier), [model, corpus, tier]);
+  // the same balanced selection practice uses, so this card is not telling a
+  // different story from the lines you are actually being given
+  const drilling = useMemo(() => {
+    const picked = new Set(selectFocus(ranked).targets);
+    return ranked.filter((g) => picked.has(g.bigram));
+  }, [ranked]);
   const classes = useMemo(() => classStanding(model, tier), [model, tier]);
   const kg = useMemo(() => keyGaps(model, tier), [model, tier]);
-  const wpmTrend = useMemo(() => rollingMean(sessions.map((s) => s.wpm), 10), [sessions]);
+  // daily averages come first so the trend keeps its history after old
+  // per-line rows have been folded away
+  const wpmTrend = useMemo(() => {
+    const older = [...days]
+      .sort((a, b) => a.day.localeCompare(b.day))
+      .filter((d) => d.lines > 0)
+      .map((d) => d.wpmSum / d.lines);
+    return rollingMean([...older, ...sessions.map((s) => s.wpm)], 10);
+  }, [sessions, days]);
   const mistakes = useMemo(() => errorPatterns(model), [model]);
+  const flow = useMemo(() => flowStanding(model), [model]);
+  const stage = useMemo(() => unlockLevel(model, tier), [model, tier]);
   // days holds everything already trimmed out of `sessions`, so the clock
   // never goes backwards when old rows are compacted away
   const minutesTotal = Math.round(
@@ -73,6 +94,43 @@ export function Standing({ model, sessions, days, corpus, onExport, onReset }: P
           Taken from ordinary practice — every keystroke is the measurement, so there is never a
           test to sit.{" "}
           {level === null && "This needs a few more minutes of typing before it can say."}
+        </div>
+        <div className="stagerow">
+          <span className="meta-label">writing</span>
+          {["Aa", ...marksFor(stage)].map((m) => (
+            <span className="tag win" key={m}>
+              {m}
+            </span>
+          ))}
+          {stage < 5 && <span className="tag">more when these settle</span>}
+        </div>
+      </div>
+
+      <div className="card">
+        <h2>Flow</h2>
+        <div className="flowrow">
+          <div className="flowstat">
+            <div className="num s">{(flow.rollover * 100).toFixed(0)}%</div>
+            <div className="cap">overlap</div>
+            <p className="note">
+              How often you start the next key before letting the last one go. The quickest typists
+              live between 40 and 70 percent; below that each key is being finished before the next
+              begins.{" "}
+              {flow.samples > 200 &&
+                (flow.rollover >= ROLLOVER_TARGET
+                  ? "Yours is where it should be."
+                  : "This is the habit with the most left in it for you.")}
+            </p>
+          </div>
+          <div className="flowstat">
+            <div className="num s">{(flow.rhythm * 100).toFixed(0)}%</div>
+            <div className="cap">evenness</div>
+            <p className="note">
+              How steady the gaps between your keys are. Two typists at the same speed are not the
+              same typist — the even one is closer to the next tier, because the movement has
+              stopped being a decision.
+            </p>
+          </div>
         </div>
       </div>
 
@@ -110,10 +168,12 @@ export function Standing({ model, sessions, days, corpus, onExport, onReset }: P
 
         <div className="card">
           <h2>What the coach is drilling</h2>
-          {ranked.length === 0 ? (
-            <div className="note">Not enough data yet.</div>
+          {drilling.length === 0 ? (
+            <div className="note">
+              Nothing is off the standard right now — practice is keeping the whole keyboard moving.
+            </div>
           ) : (
-            ranked.slice(0, 6).map((g) => (
+            drilling.map((g) => (
               <div className="weak" key={g.bigram}>
                 <span className="pair">{show(g.bigram)}</span>
                 <span className="why">{CLASS_LABELS[g.cls]}</span>
